@@ -409,6 +409,7 @@ if(PICO_RP2350)
         message(STATUS "Secure Boot Key ${SECURE_BOOT_PKEY}")
         pico_sign_binary(${CMAKE_PROJECT_NAME} ${SECURE_BOOT_PKEY})
         pico_hash_binary(${CMAKE_PROJECT_NAME})
+        pico_set_otp_key_output_file(project_name ${CMAKE_CURRENT_LIST_DIR}/otp.json)
     endif()
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE pico_bootrom)
 
