@@ -22,7 +22,7 @@
 
 #define PHY_VIDPID      0x0
 #define PHY_LED_GPIO    0x4
-#define PHY_LED_BTNESS  0x5
+#define PHY_LED_BTNESS  0x3
 #define PHY_OPTS        0x6
 #define PHY_UP_BTN      0x8
 #define PHY_USB_PRODUCT 0x9
