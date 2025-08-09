@@ -17,6 +17,7 @@
 
 #include "file.h"
 #include "pico_keys.h"
+#include <stdint.h>
 #include <stdio.h>
 #include "otp.h"
 
@@ -102,8 +103,9 @@ esp_err_t read_key_from_efuse(esp_efuse_block_t block, uint8_t *key, size_t key_
 
 #endif
 
-const uint8_t *otp_key_1 = NULL;
-const uint8_t *otp_key_2 = NULL;
+const uint8_t key1='b',key2='o';
+const uint8_t *otp_key_1 = &key1;
+const uint8_t *otp_key_2 = &key2;
 
 #ifdef PICO_RP2350
 typedef int otp_ret_t;
@@ -184,35 +186,6 @@ void init_otp_files() {
 #if defined(PICO_RP2350) || defined(ESP_PLATFORM)
     otp_ret_t ret = 0;
     uint16_t write_otp[2] = {0xFFFF, 0xFFFF};
-    if (OTP_EMTPY(OTP_KEY_1, 32)) {
-        uint8_t mkek[32] = {0};
-        random_gen(NULL, mkek, sizeof(mkek));
-        ret = OTP_WRITE(OTP_KEY_1, mkek, sizeof(mkek));
-        if (ret != 0) {
-            printf("Error writing OTP key 1 [%d]\n", ret);
-        }
-        write_otp[0] = OTP_KEY_1;
-    }
-    OTP_READ(OTP_KEY_1, otp_key_1);
-
-    if (OTP_EMTPY(OTP_KEY_2, 32)) {
-        mbedtls_ecdsa_context ecdsa;
-        size_t olen = 0;
-        uint8_t pkey[MBEDTLS_ECP_MAX_BYTES];
-        while (olen != 32) {
-            mbedtls_ecdsa_init(&ecdsa);
-            mbedtls_ecp_group_id ec_id = MBEDTLS_ECP_DP_SECP256K1;
-            mbedtls_ecdsa_genkey(&ecdsa, ec_id, random_gen, NULL);
-            mbedtls_ecp_write_key_ext(&ecdsa, &olen, pkey, sizeof(pkey));
-            mbedtls_ecdsa_free(&ecdsa);
-        }
-        ret = OTP_WRITE(OTP_KEY_2, pkey, olen);
-        if (ret != 0) {
-            printf("Error writing OTP key 2 [%d]\n", ret);
-        }
-        write_otp[1] = OTP_KEY_2;
-    }
-    OTP_READ(OTP_KEY_2, otp_key_2);
 
     for (int i = 0; i < sizeof(write_otp)/sizeof(uint16_t); i++) {
         if (write_otp[i] != 0xFFFF) {

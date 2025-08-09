@@ -35,11 +35,6 @@ extern int otp_write_data_raw(uint16_t row, uint8_t *data, uint16_t len);
 
 #elif defined(ESP_PLATFORM)
 
-#include "esp_efuse.h"
-
-#define OTP_KEY_1    EFUSE_BLK_KEY3
-#define OTP_KEY_2    EFUSE_BLK_KEY4
-
 #endif
 
 extern int otp_enable_secure_boot(uint8_t bootkey, bool secure_lock);
