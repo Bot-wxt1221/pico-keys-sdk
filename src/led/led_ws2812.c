@@ -117,7 +117,7 @@ void led_driver_color(uint8_t color, uint32_t led_brightness, float progress) {
     if (!(phy_data.opts & PHY_OPT_DIMM)) {
         progress = progress >= 0.5 ? 1 : 0;
     }
-    uint32_t led_phy_btness = MAX_BTNESS*2/5;
+    uint32_t led_phy_btness = MAX_BTNESS/5;
 
     float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
     struct urgb_color pixel_color = urgb_color_table[color];
