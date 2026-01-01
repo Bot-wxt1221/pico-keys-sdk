@@ -58,7 +58,9 @@ SET_VERSION(ver_major ver_minor "${CMAKE_CURRENT_LIST_DIR}/src/pico_keys_version
 if(ESP_PLATFORM)
     project(picokey)
 endif()
-
+target_compile_options(picokey PUBLIC
+     -DPICO_DEFAULT_WS2812_PIN=16
+)
 if(NOT ESP_PLATFORM)
     target_sources(picokey PUBLIC ${SOURCES})
     target_include_directories(picokey PUBLIC ${INCLUDES})
