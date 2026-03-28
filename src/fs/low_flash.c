@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 
@@ -22,6 +22,7 @@
 
 #include "pico_keys.h"
 #include <string.h>
+#include "crypto_utils.h"
 #ifdef PICO_PLATFORM
  #include "pico/stdlib.h"
  #include "hardware/flash.h"
@@ -32,46 +33,48 @@
  #include "pico/bootrom.h"
  #include "boot/picobin.h"
 #else
- #ifdef _MSC_VER
-  #include <windows.h>
-  #include <io.h>
-  #define O_RDWR _O_RDWR
-  #define O_CREAT _O_CREAT
-  #define open _open
-  #define write _write
-  #define mode_t unsigned short
-  #define lseek _lseek
-  #include "mman.h"
+ #ifdef ESP_PLATFORM
+  #include "esp_compat.h"
+  #include "esp_partition.h"
+  const esp_partition_t *part0;
+  #define save_and_disable_interrupts() 1
+  #define flash_range_erase(a,b) esp_partition_erase_range(part0, a, b)
+  #define flash_range_program(a,b,c) esp_partition_write(part0, a, b, c);
+  #define restore_interrupts(a) (void)a
  #else
-  #ifdef ESP_PLATFORM
-   #include "esp_compat.h"
-   #include "esp_partition.h"
-   const esp_partition_t *part0;
-   #define save_and_disable_interrupts() 1
-   #define flash_range_erase(a,b) esp_partition_erase_range(part0, a, b)
-   #define flash_range_program(a,b,c) esp_partition_write(part0, a, b, c);
-   #define restore_interrupts(a) (void)a
+  #ifdef _MSC_VER
+   #include <windows.h>
+   #include <io.h>
+   #define O_RDWR _O_RDWR
+   #define O_CREAT _O_CREAT
+   #define open _open
+   #define write _write
+   #define mode_t unsigned short
+   #define lseek _lseek
+   #include "mman.h"
   #else
    #include <unistd.h>
    #include <sys/mman.h>
-   #include "emulation.h"
   #endif
+  #include "queue.h"
  #endif
- #define FLASH_SECTOR_SIZE       4096
+ #ifdef ENABLE_EMULATION
+    #define FLASH_SECTOR_SIZE       0x4000
+ #else
+    #define FLASH_SECTOR_SIZE       0x1000
+ #endif
  #define XIP_BASE 0
  int fd_map = 0;
  uint8_t *map = NULL;
  #include <fcntl.h>
 #endif
-#ifndef ENABLE_EMULATION
+#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
 extern uint32_t FLASH_SIZE_BYTES;
 #else
 #define FLASH_SIZE_BYTES   (8 * 1024 * 1024)
 #endif
 
 #define TOTAL_FLASH_PAGES 6
-
-extern void flash_set_bounds(uintptr_t start, uintptr_t end);
 
 extern const uintptr_t start_data_pool;
 extern const uintptr_t end_rom_pool;
@@ -87,7 +90,6 @@ typedef struct page_flash {
 static page_flash_t flash_pages[TOTAL_FLASH_PAGES];
 
 static mutex_t mtx_flash;
-static semaphore_t sem_flash;
 
 #ifndef ENABLE_EMULATION
 static bool locked_out = false;
@@ -101,25 +103,31 @@ bool flash_available = false;
 
 
 //this function has to be called from the core 0
-void do_flash() {
+void do_flash(void) {
     if (mutex_try_enter(&mtx_flash, NULL) == true) {
         if (locked_out == true && flash_available == true && ready_pages > 0) {
             //printf(" DO_FLASH AVAILABLE\n");
             for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
                 if (flash_pages[r].ready == true) {
-#ifndef ENABLE_EMULATION
+#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+                    mutex_exit(&mtx_flash);
                     //printf("WRITTING %X\n",flash_pages[r].address-XIP_BASE);
-                    while (multicore_lockout_start_timeout_us(1000) == false) {
-                        ;
+                    if (multicore_lockout_start_timeout_us(1000) == false) {
+                        printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
+                        mutex_enter_blocking(&mtx_flash);
+                        continue;
                     }
                     //printf("WRITTING %X\n",flash_pages[r].address-XIP_BASE);
                     uint32_t ints = save_and_disable_interrupts();
                     flash_range_erase(flash_pages[r].address - XIP_BASE, FLASH_SECTOR_SIZE);
                     flash_range_program(flash_pages[r].address - XIP_BASE, flash_pages[r].page, FLASH_SECTOR_SIZE);
                     restore_interrupts(ints);
-                    while (multicore_lockout_end_timeout_us(1000) == false) {
-                        ;
+                    if (multicore_lockout_end_timeout_us(1000) == false) {
+                        printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
+                        mutex_enter_blocking(&mtx_flash);
+                        continue;
                     }
+                    mutex_enter_blocking(&mtx_flash);
                     //printf("WRITEN %X !\n",flash_pages[r].address);
 #else
                     memcpy(map + flash_pages[r].address, flash_pages[r].page, FLASH_SECTOR_SIZE);
@@ -128,15 +136,23 @@ void do_flash() {
                     ready_pages--;
                 }
                 else if (flash_pages[r].erase == true) {
-#ifndef ENABLE_EMULATION
-                    while (multicore_lockout_start_timeout_us(1000) == false) {
-                        ;
+#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+                    mutex_exit(&mtx_flash);
+                    if (multicore_lockout_start_timeout_us(1000) == false) {
+                        printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
+                        mutex_enter_blocking(&mtx_flash);
+                        continue;
                     }
                     //printf("WRITTING\n");
+                    uint32_t ints = save_and_disable_interrupts();
                     flash_range_erase(flash_pages[r].address - XIP_BASE, flash_pages[r].page_size ? ((int) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
-                    while (multicore_lockout_end_timeout_us(1000) == false) {
-                        ;
+                    restore_interrupts(ints);
+                    if (multicore_lockout_end_timeout_us(1000) == false) {
+                        printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
+                        mutex_enter_blocking(&mtx_flash);
+                        continue;
                     }
+                    mutex_enter_blocking(&mtx_flash);
 #else
                     memset(map + flash_pages[r].address, 0, FLASH_SECTOR_SIZE);
 #endif
@@ -144,39 +160,38 @@ void do_flash() {
                     ready_pages--;
                 }
             }
-#ifdef ENABLE_EMULATION
+#if !defined(PICO_PLATFORM) && !defined(ESP_PLATFORM)
             msync(map, FLASH_SIZE_BYTES, MS_SYNC);
 #endif
             if (ready_pages != 0) {
                 printf("ERROR: DO FLASH DOES NOT HAVE ZERO PAGES\n");
             }
         }
-        flash_available = false;
+        if (ready_pages == 0) {
+            flash_available = false;
+        }
 #ifdef ESP_PLATFORM
         esp_partition_munmap(fd_map);
         esp_partition_mmap(part0, 0, part0->size, ESP_PARTITION_MMAP_DATA, (const void **)&map, (esp_partition_mmap_handle_t *)&fd_map);
 #endif
         mutex_exit(&mtx_flash);
     }
-    sem_release(&sem_flash);
 }
 
+#ifdef PICO_RP2040
+void phymarker_write(void);
+#endif
 //this function has to be called from the core 0
-void low_flash_init() {
+void low_flash_init(void) {
+#ifdef PICO_RP2040
+    phymarker_write();
+#endif
     memset(flash_pages, 0, sizeof(page_flash_t) * TOTAL_FLASH_PAGES);
     mutex_init(&mtx_flash);
-    sem_init(&sem_flash, 0, 1);
 
     uint32_t data_start_addr;
     uint32_t data_end_addr;
-#if defined(ENABLE_EMULATION)
-    fd_map = open("memory.flash", O_RDWR | O_CREAT, (mode_t) 0600);
-    lseek(fd_map, FLASH_SIZE_BYTES - 1, SEEK_SET);
-    write(fd_map, "", 1);
-    map = mmap(0, FLASH_SIZE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd_map, 0);
-    data_start_addr = 0;
-    data_end_addr = FLASH_SIZE_BYTES;
-#elif defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM)
     part0 = esp_partition_find_first(0x40, 0x1, "part0");
     esp_partition_mmap(part0, 0, part0->size, ESP_PARTITION_MMAP_DATA, (const void **)&map, (esp_partition_mmap_handle_t *)&fd_map);
     data_start_addr = 0;
@@ -189,23 +204,26 @@ void low_flash_init() {
 
     FLASH_SIZE_BYTES = (1 << rxbuf[3]);
 #ifdef PICO_RP2350
-    __attribute__((aligned(4))) uint8_t workarea[4 * 1024];
-    int rc = rom_load_partition_table(workarea, sizeof(workarea), false);
+    __attribute__((aligned(4))) uint32_t workarea[1024];
+    int rc = rom_load_partition_table((uint8_t *)workarea, sizeof(workarea), false);
     if (rc) {
         reset_usb_boot(0, 0);
     }
 
     uint8_t boot_partition = 1;
-    rc = rom_get_partition_table_info((uint32_t*)workarea, 0x8, PT_INFO_PARTITION_LOCATION_AND_FLAGS | PT_INFO_SINGLE_PARTITION | (boot_partition << 24));
+    rc = rom_get_partition_table_info(workarea, 0x8, PT_INFO_PARTITION_LOCATION_AND_FLAGS | PT_INFO_SINGLE_PARTITION | (boot_partition << 24));
 
     if (rc != 3) {
         data_start_addr = (FLASH_SIZE_BYTES >> 1);
         data_end_addr = FLASH_SIZE_BYTES;
     } else {
-        uint16_t first_sector_number = (((uint32_t*)workarea)[1] & PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_LSB;
-        uint16_t last_sector_number = (((uint32_t*)workarea)[1] & PICOBIN_PARTITION_LOCATION_LAST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_LAST_SECTOR_LSB;
+        uint16_t first_sector_number = (workarea[1] & PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_LSB;
+        uint16_t last_sector_number = (workarea[1] & PICOBIN_PARTITION_LOCATION_LAST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_LAST_SECTOR_LSB;
         data_start_addr = first_sector_number * FLASH_SECTOR_SIZE;
         data_end_addr = (last_sector_number + 1) * FLASH_SECTOR_SIZE;
+        if (data_end_addr > FLASH_SIZE_BYTES) {
+            data_end_addr = FLASH_SIZE_BYTES;
+        }
     }
     data_end_addr -= 2 * FLASH_SECTOR_SIZE;
 #else
@@ -215,30 +233,31 @@ void low_flash_init() {
 
     data_start_addr += XIP_BASE;
     data_end_addr += XIP_BASE;
+#else
+    fd_map = open("memory.flash", O_RDWR | O_CREAT, (mode_t) 0600);
+    lseek(fd_map, FLASH_SIZE_BYTES - 1, SEEK_SET);
+    write(fd_map, "", 1);
+    map = mmap(0, FLASH_SIZE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd_map, 0);
+    data_start_addr = 0;
+    data_end_addr = FLASH_SIZE_BYTES;
 #endif
     flash_set_bounds(data_start_addr, data_end_addr);
 }
 
-void low_flash_init_core1() {
+void low_flash_init_core1(void) {
     mutex_enter_blocking(&mtx_flash);
     multicore_lockout_victim_init();
     locked_out = true;
     mutex_exit(&mtx_flash);
 }
 
-void wait_flash_finish() {
-    sem_acquire_blocking(&sem_flash); //blocks until released
-    //wake up
-    sem_acquire_blocking(&sem_flash); //decrease permits
-}
-
-void low_flash_available() {
+void low_flash_available(void) {
     mutex_enter_blocking(&mtx_flash);
     flash_available = true;
     mutex_exit(&mtx_flash);
 }
 
-page_flash_t *find_free_page(uintptr_t addr) {
+static page_flash_t *find_free_page(uintptr_t addr) {
     uintptr_t addr_alg = addr & -FLASH_SECTOR_SIZE;
     page_flash_t *p = NULL;
     for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
@@ -311,7 +330,7 @@ uint8_t *flash_read(uintptr_t addr) {
     }
     uint8_t *v = (uint8_t *) addr;
     mutex_exit(&mtx_flash);
-#if defined(ENABLE_EMULATION) || defined(ESP_PLATFORM)
+#if !defined(PICO_PLATFORM)
     if (addr >= start_data_pool && addr <= end_rom_pool + sizeof(uintptr_t)) {
         v += (uintptr_t) map;
     }
@@ -322,7 +341,7 @@ uint8_t *flash_read(uintptr_t addr) {
 uintptr_t flash_read_uintptr(uintptr_t addr) {
     uint8_t *p = flash_read(addr);
     uintptr_t v = 0x0;
-    for (int i = 0; i < sizeof(uintptr_t); i++) {
+    for (size_t i = 0; i < sizeof(uintptr_t); i++) {
         v |= (uintptr_t) p[i] << (8 * i);
     }
     return v;
@@ -330,7 +349,7 @@ uintptr_t flash_read_uintptr(uintptr_t addr) {
 uint16_t flash_read_uint16(uintptr_t addr) {
     uint8_t *p = flash_read(addr);
     uint16_t v = 0x0;
-    for (int i = 0; i < sizeof(uint16_t); i++) {
+    for (size_t i = 0; i < sizeof(uint16_t); i++) {
         v |= p[i] << (8 * i);
     }
     return v;
@@ -371,3 +390,42 @@ bool flash_check_blank(const uint8_t *p_start, size_t size) {
     }
     return true;
 }
+
+#ifdef PICO_RP2040
+typedef struct {
+    uint64_t magic;
+    uint16_t version;
+    uint16_t flags;
+    uint8_t  uid[PICO_UNIQUE_BOARD_ID_SIZE_BYTES];
+    uint32_t crc32;
+} __attribute__ ((packed)) phymarker_t;
+
+uintptr_t __phymarker_start = (uintptr_t)0x10100000;
+
+const uint64_t PHYSICAL_MARKER_MAGIC = 0x5049434F4B455953ULL; // "PICOKEYS"
+
+void phymarker_write(void) {
+    const uint64_t magic = *(uint64_t *)__phymarker_start;
+    if (magic == PHYSICAL_MARKER_MAGIC) {
+        return;
+    }
+    phymarker_t pm = {
+        .magic = PHYSICAL_MARKER_MAGIC, // "PICOKEYS"
+        .version = 0x0001,
+        .flags = 0x0000,
+        .crc32 = 0x00000000
+    };
+    memcpy(pm.uid, pico_serial.id, PICO_UNIQUE_BOARD_ID_SIZE_BYTES);
+    pm.crc32 = crc32c((const uint8_t *)&pm, sizeof(phymarker_t) - sizeof(uint32_t));
+
+    uint8_t buf[FLASH_PAGE_SIZE] = {0};
+    memcpy(buf, &pm, sizeof(phymarker_t));
+    uint32_t ints = save_and_disable_interrupts();
+
+    flash_range_erase((uint32_t)__phymarker_start - XIP_BASE, FLASH_SECTOR_SIZE);
+    flash_range_program((uint32_t)__phymarker_start - XIP_BASE, (const uint8_t *)buf, sizeof(buf));
+
+    restore_interrupts(ints);
+}
+
+#endif

@@ -3,25 +3,30 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 
 #include <stdint.h>
 #include <string.h>
+#include "pico_keys.h"
 
-#if defined(ENABLE_EMULATION) || defined(ESP_PLATFORM)
+#if !defined(PICO_PLATFORM)
 #define XIP_BASE                0
-#define FLASH_SECTOR_SIZE       4096
+#ifdef ENABLE_EMULATION
+#define FLASH_SECTOR_SIZE       0x4000
+#else
+#define FLASH_SECTOR_SIZE       0x1000
+#endif
 #ifdef ESP_PLATFORM
 uint32_t FLASH_SIZE_BYTES = (1 * 1024 * 1024);
 #else
@@ -32,7 +37,6 @@ uint32_t FLASH_SIZE_BYTES = (2 * 1024 * 1024);
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
 #endif
-#include "pico_keys.h"
 #include "file.h"
 #include <stdio.h>
 
@@ -50,15 +54,6 @@ uint32_t FLASH_SIZE_BYTES = (2 * 1024 * 1024);
 //To avoid possible future allocations, data region starts at the end of flash and goes upwards to the center region
 uintptr_t end_flash, end_rom_pool, start_rom_pool, end_data_pool, start_data_pool;
 
-extern int flash_program_block(uintptr_t addr, const uint8_t *data, size_t len);
-extern int flash_program_halfword(uintptr_t addr, uint16_t data);
-extern int flash_program_uintptr(uintptr_t, uintptr_t);
-extern uintptr_t flash_read_uintptr(uintptr_t addr);
-extern uint16_t flash_read_uint16(uintptr_t addr);
-extern uint8_t *flash_read(uintptr_t addr);
-
-extern void low_flash_available();
-
 uintptr_t last_base;
 uint32_t num_files = 0;
 
@@ -72,7 +67,7 @@ void flash_set_bounds(uintptr_t start, uintptr_t end) {
     last_base = end_data_pool;
 }
 
-uintptr_t allocate_free_addr(uint16_t size, bool persistent) {
+static uintptr_t allocate_free_addr(uint16_t size, bool persistent) {
     if (size > FLASH_SECTOR_SIZE) {
         return 0x0; //ERROR
     }
@@ -140,7 +135,7 @@ int flash_clear_file(file_t *file) {
     return PICOKEY_OK;
 }
 
-int flash_write_data_to_file_offset(file_t *file, const uint8_t *data, uint16_t len, uint16_t offset) {
+static int flash_write_data_to_file_offset(file_t *file, const uint8_t *data, uint16_t len, uint16_t offset) {
     if (!file) {
         return PICOKEY_ERR_NULL_PARAM;
     }
@@ -194,22 +189,22 @@ int flash_write_data_to_file(file_t *file, const uint8_t *data, uint16_t len) {
     return flash_write_data_to_file_offset(file, data, len, 0);
 }
 
-uint32_t flash_free_space() {
-    return last_base - start_data_pool;
+uint32_t flash_free_space(void) {
+    return (uint32_t)(last_base - start_data_pool);
 }
 
-uint32_t flash_used_space() {
-    return end_data_pool - last_base;
+uint32_t flash_used_space(void) {
+    return (uint32_t)(end_data_pool - last_base);
 }
 
-uint32_t flash_total_space() {
-    return end_data_pool - start_data_pool;
+uint32_t flash_total_space(void) {
+    return (uint32_t)(end_data_pool - start_data_pool);
 }
 
-uint32_t flash_num_files() {
+uint32_t flash_num_files(void) {
     return num_files;
 }
 
-uint32_t flash_size() {
+uint32_t flash_size(void) {
     return FLASH_SIZE_BYTES;
 }

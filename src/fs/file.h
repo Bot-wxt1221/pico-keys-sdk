@@ -3,23 +3,23 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _FILE_H_
 #define _FILE_H_
 
 #include <stdlib.h>
-#if !defined(ENABLE_EMULATION) && !defined(ESP_PLATFORM)
+#if defined(PICO_PLATFORM)
 #include "pico/stdlib.h"
 #else
 #include <stdbool.h>
@@ -55,6 +55,13 @@
 #define ACL_OP_UPDATE_ERASE     0x05
 #define ACL_OP_READ_SEARCH      0x06
 
+#define ACL_NONE    { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }
+#define ACL_ALL     { 0 }
+#define ACL_RO      { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 }
+#define ACL_RW      { 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00 }
+#define ACL_R_WP    { 0xff, 0xff, 0xff, 0xff, 0x90, 0x90, 0x00 }
+#define ACL_WP      { 0xff, 0xff, 0xff, 0xff, 0x90, 0x90, 0xff }
+
 #define SPECIFY_EF 0x1
 #define SPECIFY_DF 0x2
 #define SPECIFY_ANY 0x3
@@ -71,18 +78,27 @@
 
 #define MAX_DYNAMIC_FILES 256
 
+#ifdef _MSC_VER
+__pragma( pack(push, 1) )
+#endif
 typedef struct file {
     const uint8_t *name;
     uint8_t *data;              //should include 2 bytes len at begining
     const uint16_t fid;
-    const uint8_t acl[7];
+    uint8_t acl[7];
     const uint8_t parent;       //entry number in the whole table!!
     const uint8_t type;
     const uint8_t ef_structure;
 #ifdef ENABLE_EMULATION
     uint32_t _padding;
 #endif
-} __attribute__ ((packed)) file_t;
+}
+#ifdef _MSC_VER
+__pragma( pack(pop) )
+#else
+__attribute__ ((packed))
+#endif
+file_t;
 
 extern bool file_has_data(file_t *);
 
@@ -106,7 +122,7 @@ extern file_t *search_by_name(uint8_t *name, uint16_t namelen);
 extern file_t *search_by_path(const uint8_t *pe_path, uint8_t pathlen, const file_t *parent);
 extern bool authenticate_action(const file_t *ef, uint8_t op);
 extern void process_fci(const file_t *pe, int fmd);
-extern void scan_flash();
+extern void scan_flash(void);
 extern void initialize_flash(bool);
 
 extern file_t file_entries[];
@@ -133,11 +149,26 @@ extern int meta_delete(uint16_t fid);
 extern int meta_add(uint16_t fid, const uint8_t *data, uint16_t len);
 extern int delete_file(file_t *ef);
 
-extern uint32_t flash_free_space();
-extern uint32_t flash_used_space();
-extern uint32_t flash_total_space();
-extern uint32_t flash_num_files();
-extern uint32_t flash_size();
+extern uint32_t flash_free_space(void);
+extern uint32_t flash_used_space(void);
+extern uint32_t flash_total_space(void);
+extern uint32_t flash_num_files(void);
+extern uint32_t flash_size(void);
+
+extern void flash_set_bounds(uintptr_t start, uintptr_t end);
+extern int flash_write_data_to_file(file_t *file, const uint8_t *data, uint16_t len);
+extern int flash_program_block(uintptr_t addr, const uint8_t *data, size_t len);
+extern int flash_program_halfword(uintptr_t addr, uint16_t data);
+extern int flash_program_word(uintptr_t addr, uint32_t data);
+extern int flash_program_uintptr(uintptr_t addr, uintptr_t data);
+extern uintptr_t flash_read_uintptr(uintptr_t addr);
+extern uint16_t flash_read_uint16(uintptr_t addr);
+extern uint8_t flash_read_uint8(uintptr_t addr);
+extern uint8_t *flash_read(uintptr_t addr);
+extern int flash_erase_page(uintptr_t addr, size_t page_size);
+extern bool flash_check_blank(const uint8_t *p_start, size_t size);
+extern void do_flash(void);
+extern void low_flash_init(void);
 
 #ifndef ENABLE_EMULATION
 extern file_t *ef_phy;

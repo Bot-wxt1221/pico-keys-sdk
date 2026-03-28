@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _LED_H_
@@ -62,9 +62,16 @@ enum  {
 };
 
 extern void led_set_mode(uint32_t mode);
-extern uint32_t led_get_mode();
-extern void led_blinking_task();
-extern void led_off_all();
-extern void led_init();
+extern uint32_t led_get_mode(void);
+extern void led_blinking_task(void);
+extern void led_off_all(void);
+extern void led_init(void);
+
+typedef struct {
+    void (*init)(void);
+    void (*set_color)(uint8_t color, uint32_t led_brightness, float progress);
+} led_driver_t;
+
+extern led_driver_t *led_driver;
 
 #endif // _LED_H_

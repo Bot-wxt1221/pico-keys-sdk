@@ -3,20 +3,21 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "pico_keys.h"
 #include "file.h"
+#include "otp.h"
 
 #ifndef ENABLE_EMULATION
 
@@ -55,7 +56,7 @@ int phy_serialize_data(const phy_data_t *phy, uint8_t *data, uint16_t *len) {
     }
     if (phy->usb_product_present) {
         *p++ = PHY_USB_PRODUCT;
-        *p++ = strlen(phy->usb_product) + 1;
+        *p++ = (uint8_t)strlen(phy->usb_product) + 1;
         strcpy((char *)p, phy->usb_product);
         p += strlen(phy->usb_product);
         *p++ = '\0';
@@ -70,8 +71,13 @@ int phy_serialize_data(const phy_data_t *phy, uint8_t *data, uint16_t *len) {
         *p++ = 1;
         *p++ = phy->enabled_usb_itf;
     }
+    if (phy->led_driver_present) {
+        *p++ = PHY_LED_DRIVER;
+        *p++ = 1;
+        *p++ = phy->led_driver;
+    }
 
-    *len = p - data;
+    *len = (uint8_t)(p - data);
     return PICOKEY_OK;
 }
 
@@ -141,6 +147,12 @@ int phy_unserialize_data(const uint8_t *data, uint16_t len, phy_data_t *phy) {
                     phy->enabled_usb_itf_present = true;
                 }
                 break;
+            case PHY_LED_DRIVER:
+                if (tlen == 1) {
+                    phy->led_driver = *p++;
+                    phy->led_driver_present = true;
+                }
+                break;
             default:
                 p += tlen;
                 break;
@@ -153,12 +165,12 @@ int phy_unserialize_data(const uint8_t *data, uint16_t len, phy_data_t *phy) {
     return PICOKEY_OK;
 }
 
-int phy_init() {
+int phy_init(void) {
     memset(&phy_data, 0, sizeof(phy_data_t));
     return phy_load();
 }
 
-int phy_save() {
+int phy_save(void) {
     uint8_t tmp[PHY_MAX_SIZE] = {0};
     uint16_t tmp_len = 0;
     int ret = phy_serialize_data(&phy_data, tmp, &tmp_len);
@@ -170,7 +182,7 @@ int phy_save() {
     return PICOKEY_OK;
 }
 
-int phy_load() {
+int phy_load(void) {
     if (file_has_data(ef_phy)) {
         return phy_unserialize_data(file_get_data(ef_phy), file_get_size(ef_phy), &phy_data);
     }

@@ -3,18 +3,19 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "pico_keys.h"
 #include "emulation.h"
 #include <stdio.h>
 #ifndef _MSC_VER
@@ -41,7 +42,6 @@ typedef int socklen_t;
 #include <errno.h>
 #include <time.h>
 
-#include "pico_keys.h"
 #include "apdu.h"
 #include "usb.h"
 #include "ccid/ccid.h"
@@ -60,7 +60,7 @@ extern int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len);
 pthread_t hcore0, hcore1;
 
 #ifndef _MSC_VER
-int msleep(long msec) {
+static int msleep(long msec) {
     struct timespec ts;
     int res;
 
@@ -80,7 +80,7 @@ int msleep(long msec) {
 }
 #endif
 
-int emul_init(char *host, uint16_t port) {
+int emul_init(const char *host, uint16_t port) {
     struct sockaddr_in serv_addr;
     fprintf(stderr, "\n Starting emulation envionrment\n");
 #ifdef _MSC_VER
@@ -167,7 +167,7 @@ int emul_init(char *host, uint16_t port) {
     return 0;
 }
 
-socket_t get_sock_itf(uint8_t itf) {
+static socket_t get_sock_itf(uint8_t itf) {
 #ifdef USB_ITF_CCID
     if (itf == ITF_CCID) {
         return ccid_sock;
@@ -333,7 +333,7 @@ uint16_t emul_read(uint8_t itf) {
     return emul_rx_size;
 }
 
-void emul_task() {
+void emul_task(void) {
 #ifdef USB_ITF_CCID
     emul_read(ITF_CCID);
 #endif

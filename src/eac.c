@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "eac.h"
@@ -21,6 +21,11 @@
 #include "mbedtls/cmac.h"
 #include "asn1.h"
 #include "apdu.h"
+#ifdef ENABLE_EMULATION
+#include "usb/emulation/emulation.h"
+#else
+#include "usb/usb.h"
+#endif
 
 static uint8_t sm_nonce[8];
 static uint8_t sm_kmac[16];
@@ -29,19 +34,13 @@ static MSE_protocol sm_protocol = MSE_NONE;
 static mbedtls_mpi sm_mSSC;
 static uint8_t sm_blocksize = 0;
 static uint8_t sm_iv[16];
-uint16_t sm_session_pin_len = 0;
-uint8_t sm_session_pin[16];
+static bool sm_active = false;
 
-bool is_secured_apdu() {
+bool is_secured_apdu(void) {
     return CLA(apdu) & 0xC;
 }
 
-void sm_derive_key(const uint8_t *input,
-                   size_t input_len,
-                   uint8_t counter,
-                   const uint8_t *nonce,
-                   size_t nonce_len,
-                   uint8_t *out) {
+static void sm_derive_key(const uint8_t *input, size_t input_len, uint8_t counter, const uint8_t *nonce, size_t nonce_len, uint8_t *out) {
     uint8_t *b = (uint8_t *) calloc(1, input_len + nonce_len + 4);
     if (input) {
         memcpy(b, input, input_len);
@@ -60,11 +59,12 @@ void sm_derive_all_keys(const uint8_t *derived, size_t derived_len) {
     memcpy(sm_nonce, random_bytes_get(8), 8);
     sm_derive_key(derived, derived_len, 1, sm_nonce, sizeof(sm_nonce), sm_kenc);
     sm_derive_key(derived, derived_len, 2, sm_nonce, sizeof(sm_nonce), sm_kmac);
+    mbedtls_mpi_free(&sm_mSSC);
     mbedtls_mpi_init(&sm_mSSC);
     mbedtls_mpi_grow(&sm_mSSC, sm_blocksize);
     mbedtls_mpi_lset(&sm_mSSC, 0);
     memset(sm_iv, 0, sizeof(sm_iv));
-    sm_session_pin_len = 0;
+    sm_active = true;
 }
 
 void sm_set_protocol(MSE_protocol proto) {
@@ -75,29 +75,35 @@ void sm_set_protocol(MSE_protocol proto) {
     else if (proto == MSE_3DES) {
         sm_blocksize = 8;
     }
+    else {
+        sm_blocksize = 0;
+    }
+    memset(sm_kenc, 0, sizeof(sm_kenc));
+    memset(sm_kmac, 0, sizeof(sm_kmac));
+    memset(sm_nonce, 0, sizeof(sm_nonce));
+    memset(sm_iv, 0, sizeof(sm_iv));
+    sm_active = false;
 }
 
-MSE_protocol sm_get_protocol() {
+MSE_protocol sm_get_protocol(void) {
     return sm_protocol;
 }
 
-uint8_t *sm_get_nonce() {
+uint8_t *sm_get_nonce(void) {
     return sm_nonce;
 }
 
-int sm_sign(uint8_t *in, size_t in_len, uint8_t *out) {
-    return mbedtls_cipher_cmac(mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB),
-                               sm_kmac,
-                               128,
-                               in,
-                               in_len,
-                               out);
+int sm_sign(uint8_t *in, size_t in_len, uint8_t out[16]) {
+    return mbedtls_cipher_cmac(mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB), sm_kmac, 128, in, in_len, out);
 }
 
-int sm_unwrap() {
+int sm_unwrap(void) {
     uint8_t sm_indicator = (CLA(apdu) >> 2) & 0x3;
     if (sm_indicator == 0) {
         return PICOKEY_OK;
+    }
+    if (!sm_active || sm_blocksize == 0) {
+        return PICOKEY_EXEC_ERROR;
     }
     int r = sm_verify();
     if (r != PICOKEY_OK) {
@@ -113,8 +119,7 @@ int sm_unwrap() {
     uint16_t tag_len = 0;
     asn1_ctx_t ctxi;
     asn1_ctx_init(apdu.data, (uint16_t)apdu.nc, &ctxi);
-    while (walk_tlv(&ctxi, &p, &tag, &tag_len, &tag_data))
-    {
+    while (walk_tlv(&ctxi, &p, &tag, &tag_len, &tag_data)) {
         if (tag == 0x87 || tag == 0x85) {
             body = tag_data;
             body_size = tag_len;
@@ -139,12 +144,15 @@ int sm_unwrap() {
     return PICOKEY_OK;
 }
 
-int sm_wrap() {
+int sm_wrap(void) {
     uint8_t sm_indicator = (CLA(apdu) >> 2) & 0x3;
     if (sm_indicator == 0) {
         return PICOKEY_OK;
     }
-    uint8_t input[2048];
+    if (!sm_active || sm_blocksize == 0) {
+        return PICOKEY_EXEC_ERROR;
+    }
+    uint8_t input[USB_BUFFER_SIZE];
     size_t input_len = 0;
     memset(input, 0, sizeof(input));
     mbedtls_mpi ssc;
@@ -205,7 +213,7 @@ int sm_wrap() {
     return PICOKEY_OK;
 }
 
-uint16_t sm_get_le() {
+uint16_t sm_get_le(void) {
     uint16_t tag = 0x0;
     uint8_t *tag_data = NULL, *p = NULL;
     uint16_t tag_len = 0;
@@ -223,7 +231,7 @@ uint16_t sm_get_le() {
     return 0;
 }
 
-void sm_update_iv() {
+void sm_update_iv(void) {
     uint8_t tmp_iv[16], sc_counter[16];
     memset(tmp_iv, 0, sizeof(tmp_iv)); //IV is always 0 for encryption of IV based on counter
     mbedtls_mpi_write_binary(&sm_mSSC, sc_counter, sizeof(sc_counter));
@@ -231,13 +239,13 @@ void sm_update_iv() {
     memcpy(sm_iv, sc_counter, sizeof(sc_counter));
 }
 
-int sm_verify() {
-    uint8_t input[2048];
+int sm_verify(void) {
+    uint8_t input[USB_BUFFER_SIZE];
     memset(input, 0, sizeof(input));
     uint16_t input_len = 0;
     int r = 0;
     bool add_header = (CLA(apdu) & 0xC) == 0xC;
-    int data_len = (int) (apdu.nc / sm_blocksize) * sm_blocksize;
+    size_t data_len = (size_t)(apdu.nc / sm_blocksize) * sm_blocksize;
     if (data_len % sm_blocksize) {
         data_len += sm_blocksize;
     }
@@ -284,7 +292,7 @@ int sm_verify() {
             mac_len = tag_len;
         }
     }
-    if (!mac) {
+    if (!mac || mac_len != 8) {
         return PICOKEY_WRONG_DATA;
     }
     if (some_added) {

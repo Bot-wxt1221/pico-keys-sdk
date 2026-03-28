@@ -3,38 +3,160 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#if defined(ENABLE_EMULATION)
-#elif defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM)
 #include "esp_compat.h"
-#else
+#elif defined(PICO_PLATFORM)
 #include <pico/unique_id.h>
 #endif
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/aes.h"
+#include "mbedtls/hkdf.h"
+#include "mbedtls/gcm.h"
 #include "crypto_utils.h"
 #include "pico_keys.h"
+#include "otp.h"
+#include "random.h"
+#include <stdio.h>
 
+int ct_memcmp(const void *a, const void *b, size_t n) {
+    const volatile uint8_t *x = (const volatile uint8_t *)a;
+    const volatile uint8_t *y = (const volatile uint8_t *)b;
+    uint8_t r = 0;
+    for (size_t i = 0; i < n; ++i) {
+        r |= x[i] ^ y[i];
+    }
+    return r;
+}
+
+static const mbedtls_md_info_t *SHA256(void) {
+    return mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+}
+
+void derive_kbase(uint8_t kbase[32]) {
+    const uint8_t nootp_salt[] = "NO-OTP";
+    if (otp_key_1) {
+        mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), otp_key_1, 32, (const uint8_t *)"DEVICE/ROOT", 12, kbase, 32);
+    }
+    else {
+        mbedtls_hkdf(SHA256(), nootp_salt, sizeof(nootp_salt)-1, pico_serial_hash, sizeof(pico_serial_hash), (const uint8_t *)"DEVICE/ROOT", 12, kbase, 32);
+    }
+}
+
+void derive_kver(const uint8_t *pin, size_t pin_len, uint8_t kver[32]) {
+    uint8_t kbase[32];
+    derive_kbase(kbase);
+    mbedtls_md_hmac(SHA256(), kbase, 32, pin, pin_len, kver);
+    mbedtls_platform_zeroize(kbase, sizeof(kbase));
+}
+
+void pin_derive_verifier(const uint8_t *pin, size_t pin_len, uint8_t verifier[32]) {
+    uint8_t kver[32];
+    derive_kver(pin, pin_len, kver);
+    mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), kver, 32, (const uint8_t *)"PIN/VERIFY", 10, verifier, 32);
+    mbedtls_platform_zeroize(kver, sizeof(kver));
+}
+
+void pin_derive_session(const uint8_t *pin, size_t pin_len, uint8_t pin_token[32]) {
+    uint8_t kver[32];
+    derive_kver(pin, pin_len, kver);
+    mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), kver, 32, (const uint8_t *)"PIN/TOKEN", 9, pin_token, 32);
+    mbedtls_platform_zeroize(kver, sizeof(kver));
+}
+
+void pin_derive_kenc(const uint8_t pin_token[32], uint8_t kenc[32]) {
+    mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), pin_token, 32, (const uint8_t *)"PIN/ENC", 7, kenc, 32);
+}
+
+void pin_derive_kenc2(const uint8_t pin_token[32], uint8_t kenc[32]) {
+    uint8_t kbase[64];
+    derive_kbase(kbase);
+    memcpy(kbase + 32, pin_token, 32);
+    mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), kbase, 64, (const uint8_t *)"PIN/ENC2", 8, kenc, 32);
+    mbedtls_platform_zeroize(kbase, sizeof(kbase));
+}
+
+// ------------------------------------------------------------------
+// Encrypt 32-byte device key using AES-256-GCM
+// Output: [nonce|ciphertext|tag]  =  12 + in_len + 16 = 60 bytes
+// ------------------------------------------------------------------
+int encrypt_with_aad(const uint8_t key[32], const uint8_t *in_buf, size_t in_len, uint8_t version, uint8_t *out_buf) {
+    uint8_t *nonce = out_buf;
+    uint8_t *ct    = out_buf + 12;
+    uint8_t *tag   = out_buf + 12 + in_len;
+
+    random_gen(NULL, nonce, 12);
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    uint8_t kenc[32];
+    if (version == 2) {
+        pin_derive_kenc2(key, kenc);
+    } else {
+        pin_derive_kenc(key, kenc);
+    }
+    int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, kenc, 256);
+    mbedtls_platform_zeroize(kenc, sizeof(kenc));
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, in_len, nonce, 12, pico_serial_hash, sizeof(pico_serial_hash), in_buf, ct, 16, tag);
+    mbedtls_gcm_free(&gcm);
+    return rc;
+}
+
+// ------------------------------------------------------------------
+// Decrypt & verify 32-byte device key using AES-256-GCM
+// Input: [nonce|ciphertext|tag]  =  in_len bytes
+// Output: decrypted = in_len - 12 - 16 bytes
+// ------------------------------------------------------------------
+int decrypt_with_aad(const uint8_t key[32], const uint8_t *in_buf, size_t in_len, uint8_t version, uint8_t *out_buf) {
+    const uint8_t *nonce = in_buf;
+    const uint8_t *ct    = in_buf + 12;
+    const uint8_t *tag   = in_buf + in_len - 16;
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    uint8_t kenc[32];
+    if (version == 2) {
+        pin_derive_kenc2(key, kenc);
+    } else {
+        pin_derive_kenc(key, kenc);
+    }
+    int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, kenc, 256);
+    mbedtls_platform_zeroize(kenc, sizeof(kenc));
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = mbedtls_gcm_auth_decrypt(&gcm, in_len - 16 - 12, nonce, 12, pico_serial_hash, sizeof(pico_serial_hash), tag, 16, ct, out_buf);
+    mbedtls_gcm_free(&gcm);
+    return rc;
+}
+
+// Old functions, kept for compatibility. NOT SECURE, use the new ones above.
 void double_hash_pin(const uint8_t *pin, uint16_t len, uint8_t output[32]) {
     uint8_t o1[32];
     hash_multi(pin, len, o1);
-    for (int i = 0; i < sizeof(o1); i++) {
+    for (size_t i = 0; i < sizeof(o1); i++) {
         o1[i] ^= pin[i % len];
     }
     hash_multi(o1, sizeof(o1), output);
 }
+
 
 void hash_multi(const uint8_t *input, uint16_t len, uint8_t output[32]) {
     mbedtls_sha256_context ctx;
@@ -171,4 +293,17 @@ mbedtls_ecp_group_id ec_get_curve_from_prime(const uint8_t *prime, size_t prime_
         }
     }
     return MBEDTLS_ECP_DP_NONE;
+}
+
+#define POLY 0xedb88320
+
+uint32_t crc32c(const uint8_t *buf, size_t len) {
+    uint32_t crc = 0xffffffff;
+    while (len--) {
+        crc ^= *buf++;
+        for (int k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (POLY & (0 - (crc & 1)));
+        }
+    }
+    return ~crc;
 }

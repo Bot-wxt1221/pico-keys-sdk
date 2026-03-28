@@ -3,20 +3,22 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _PICO_KEYS_H_
 #define _PICO_KEYS_H_
+
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 
 #if defined(PICO_RP2040) || defined(PICO_RP2350)
 #define PICO_PLATFORM
@@ -24,7 +26,6 @@
 
 #include "file.h"
 #include "led/led.h"
-#if defined(ENABLE_EMULATION) || defined(ESP_PLATFORM)
 #include <stdint.h>
 #if !defined(MIN)
 #if defined(_MSC_VER)
@@ -46,7 +47,7 @@
        _a > _b ? _a : _b; })
 #endif
 #endif
-#else
+#if defined(PICO_PLATFORM)
 #include "pico/unique_id.h"
 #endif
 #include <string.h>
@@ -56,13 +57,23 @@
 #include <stdbool.h>
 #elif defined(ESP_PLATFORM)
 #include "esp_compat.h"
-#else
+#elif defined(PICO_PLATFORM)
 #include "pico/util/queue.h"
 #endif
 
-extern bool wait_button();
+#ifdef PICO_PLATFORM
+#include "pico/bootrom.h"
+#include "hardware/watchdog.h"
+#include "pico/aon_timer.h"
+#else
+#include <sys/time.h>
+#include <time.h>
+#endif
 
-extern void low_flash_init_core1();
+extern bool wait_button(void);
+extern int picokey_init(void);
+
+extern void low_flash_init_core1(void);
 
 static inline uint16_t make_uint16_t_be(uint8_t b1, uint8_t b2) {
     return (b1 << 8) | b2;
@@ -76,12 +87,12 @@ static inline uint16_t get_uint16_t_be(const uint8_t *b) {
 static inline uint16_t get_uint16_t_le(const uint8_t *b) {
     return make_uint16_t_le(b[0], b[1]);
 }
-static inline uint32_t put_uint16_t_be(uint16_t n, uint8_t *b) {
+static inline uint8_t put_uint16_t_be(uint16_t n, uint8_t *b) {
     *b++ = (n >> 8) & 0xff;
     *b = n & 0xff;
     return 2;
 }
-static inline uint32_t put_uint16_t_le(uint16_t n, uint8_t *b) {
+static inline uint8_t put_uint16_t_le(uint16_t n, uint8_t *b) {
     *b++ = n & 0xff;
     *b = (n >> 8) & 0xff;
     return 2;
@@ -149,13 +160,12 @@ static inline uint32_t put_uint64_t_le(uint64_t n, uint8_t *b) {
     return 8;
 }
 
-extern void low_flash_available();
+extern void low_flash_available(void);
 extern int flash_clear_file(file_t *file);
 
 extern int (*button_pressed_cb)(uint8_t);
 
-extern bool is_req_button_pending();
-extern uint32_t button_timeout;
+extern bool is_req_button_pending(void);
 
 #define SW_BYTES_REMAINING_00()             set_res_sw(0x61, 0x00)
 #define SW_WARNING_STATE_UNCHANGED()        set_res_sw(0x62, 0x00)
@@ -230,11 +240,20 @@ extern uint32_t button_timeout;
 
 #define PICOKEY_CHECK(x) do { ret = (x); if (ret != PICOKEY_OK) goto err; } while (0)
 
-#if defined(ENABLE_EMULATION) || defined(ESP_PLATFORM)
+#if !defined (PICO_PLATFORM)
 #define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8
 typedef struct { uint8_t id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES]; } pico_unique_board_id_t;
 #endif
 extern pico_unique_board_id_t pico_serial;
 extern char pico_serial_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+extern uint8_t pico_serial_hash[32];
+
+#if defined(PICO_PLATFORM)
+#define multicore_launch_func_core1(a) multicore_launch_core1((void (*) (void))a)
+#endif
+
+extern bool has_set_rtc(void);
+extern time_t get_rtc_time(void);
+extern void set_rtc_time(time_t tv_sec);
 
 #endif

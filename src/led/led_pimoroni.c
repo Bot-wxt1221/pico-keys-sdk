@@ -3,30 +3,25 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "pico_keys.h"
 
-#if defined(PIMORONI_TINY2040) || defined(PIMORONI_TINY2350)
-
-#ifdef PIMORONI_TINY2040
-#define LED_R_PIN TINY2040_LED_R_PIN
-#define LED_G_PIN TINY2040_LED_G_PIN
-#define LED_B_PIN TINY2040_LED_B_PIN
-#elif defined(PIMORONI_TINY2350)
-#define LED_R_PIN TINY2350_LED_R_PIN
-#define LED_G_PIN TINY2350_LED_G_PIN
-#define LED_B_PIN TINY2350_LED_B_PIN
+#ifdef PICO_PLATFORM
+#ifdef PICO_DEFAULT_LED_PIN
+static uint8_t gpio = PICO_DEFAULT_LED_PIN;
+#else
+static uint8_t gpio = 0;
 #endif
 
 uint8_t pixel[][3] = {
@@ -40,22 +35,31 @@ uint8_t pixel[][3] = {
     {0, 0, 0}  // 7: white
 };
 
-void led_driver_init() {
-    gpio_init(LED_R_PIN);
-    gpio_set_dir(LED_R_PIN, GPIO_OUT);
-    gpio_init(LED_G_PIN);
-    gpio_set_dir(LED_G_PIN, GPIO_OUT);
-    gpio_init(LED_B_PIN);
-    gpio_set_dir(LED_B_PIN, GPIO_OUT);
+static void led_driver_init_pimoroni(void) {
+    if (phy_data.led_gpio_present) {
+        gpio = phy_data.led_gpio;
+    }
+    gpio_init(gpio-1);
+    gpio_set_dir(gpio-1, GPIO_OUT);
+    gpio_init(gpio);
+    gpio_set_dir(gpio, GPIO_OUT);
+    gpio_init(gpio+1);
+    gpio_set_dir(gpio+1, GPIO_OUT);
 }
 
-void led_driver_color(uint8_t color, uint32_t led_brightness, float progress) {
+static void led_driver_color_pimoroni(uint8_t color, uint32_t led_brightness, float progress) {
+    (void)led_brightness;
     if (progress < 0.5) {
         color = LED_COLOR_OFF;
     }
-    gpio_put(LED_R_PIN, pixel[color][0]);
-    gpio_put(LED_G_PIN, pixel[color][1]);
-    gpio_put(LED_B_PIN, pixel[color][2]);
+    gpio_put(gpio-1, pixel[color][0]);
+    gpio_put(gpio, pixel[color][1]);
+    gpio_put(gpio+1, pixel[color][2]);
 }
+
+led_driver_t led_driver_pimoroni = {
+    .init = led_driver_init_pimoroni,
+    .set_color = led_driver_color_pimoroni,
+};
 
 #endif

@@ -3,21 +3,22 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "pico_keys.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
-#if !defined(ENABLE_EMULATION) && !defined(ESP_PLATFORM)
+#if defined(PICO_PLATFORM)
 #include "pico/unique_id.h"
 #endif
 #ifdef ESP_PLATFORM
@@ -25,16 +26,19 @@
 #endif
 #include "pico_keys_version.h"
 #include "usb.h"
-#include "pico_keys.h"
 
 #ifndef USB_VID
-#define USB_VID   0xFEFF
+#define USB_VID   0x2E8A
 #endif
 #ifndef USB_PID
-#define USB_PID   0xFCFD
+#define USB_PID   0x10FD
 #endif
 
-#define USB_BCD   0x0200
+#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+#define USB_BCD   0x0210
+#else
+#define USB_BCD   0x0110
+#endif
 
 #define USB_CONFIG_ATT_ONE TU_BIT(7)
 
@@ -103,8 +107,9 @@ uint8_t const desc_hid_report_kb[] = {
 #endif
 
 enum {
+    EPNUM_DUMMY = 0,
 #ifdef USB_ITF_CCID
-    EPNUM_CCID = 1,
+    EPNUM_CCID,
 #if TUSB_SMARTCARD_CCID_EPS == 3
     EPNUM_CCID_INT,
 #endif
@@ -131,7 +136,7 @@ enum {
 #if TUSB_SMARTCARD_CCID_EPS == 3
 #define TUD_SMARTCARD_DESCRIPTOR(_itf, _strix, _epout, _epin, _epint, _epsize) \
     TUD_SMARTCARD_DESCRIPTOR_2EP(_itf, _strix, _epout, _epin, _epsize), \
-    7, TUSB_DESC_ENDPOINT, _epint,  TUSB_XFER_INTERRUPT, U16_TO_U8S_LE(_epsize), 0
+    7, TUSB_DESC_ENDPOINT, _epint,  TUSB_XFER_INTERRUPT, U16_TO_U8S_LE(_epsize), 10
 #else
 #define TUD_SMARTCARD_DESCRIPTOR(_itf, _strix, _epout, _epin, _epint, _epsize) \
     TUD_SMARTCARD_DESCRIPTOR_2EP(_itf, _strix, _epout, _epin, _epsize)
@@ -155,20 +160,20 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 }
 #endif
 
-void usb_desc_setup() {
+void usb_desc_setup(void) {
     desc_config[4] = ITF_TOTAL;
     TUSB_DESC_TOTAL_LEN = TUD_CONFIG_DESC_LEN;
     uint8_t *p = desc_config + TUD_CONFIG_DESC_LEN;
 #ifdef USB_ITF_HID
     if (ITF_HID != ITF_INVALID) {
         TUSB_DESC_TOTAL_LEN += TUD_HID_INOUT_DESC_LEN;
-        const uint8_t desc[] = { TUD_HID_INOUT_DESCRIPTOR(ITF_HID, ITF_HID + 5, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, TUSB_DIR_IN_MASK | EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 10) };
+        const uint8_t desc[] = { TUD_HID_INOUT_DESCRIPTOR(ITF_HID, ITF_HID + 5, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, (uint8_t)TUSB_DIR_IN_MASK | EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 10) };
         memcpy(p, desc, sizeof(desc));
         p += sizeof(desc);
     }
     if (ITF_KEYBOARD != ITF_INVALID) {
         TUSB_DESC_TOTAL_LEN += TUD_HID_DESC_LEN;
-        const uint8_t desc_kb[] = { TUD_HID_DESCRIPTOR(ITF_KEYBOARD, ITF_KEYBOARD + 5, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report_kb), TUSB_DIR_IN_MASK | EPNUM_HID_KB, 16, 5) };
+        const uint8_t desc_kb[] = { TUD_HID_DESCRIPTOR(ITF_KEYBOARD, ITF_KEYBOARD + 5, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report_kb), (uint8_t)TUSB_DIR_IN_MASK | EPNUM_HID_KB, 16, 5) };
         memcpy(p, desc_kb, sizeof(desc_kb));
         p += sizeof(desc_kb);
     }
@@ -198,6 +203,8 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     return desc_config;
 }
 #endif
+
+#ifdef USB_ITF_WCID
 
 #define BOS_TOTAL_LEN     (TUD_BOS_DESC_LEN + TUD_BOS_WEBUSB_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
 #define MS_OS_20_DESC_LEN  0xB2
@@ -302,25 +309,28 @@ uint8_t const *tud_descriptor_bos_cb(void) {
     return desc_bos;
 }
 
+#endif
+
 //--------------------------------------------------------------------+
 // String Descriptors
 //--------------------------------------------------------------------+
 
 // array of pointer to string descriptors
+char *string_desc_itf[4] = {0};
 char const *string_desc_arr [] = {
     (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
     "Pol Henarejos",                     // 1: Manufacturer
     "Pico Key",                       // 2: Product
     "11223344",                      // 3: Serials, should use chip ID
     "Config"               // 4: Vendor Interface
-#ifdef USB_ITF_HID
     , "HID Interface"
     , "HID Keyboard Interface"
-#endif
-#ifdef USB_ITF_CCID
+#ifdef USB_ITF_HID
     , "CCID OTP FIDO Interface"
-    , "WebCCID Interface"
+#else
+    , "CCID Interface"
 #endif
+    , "WebCCID Interface"
 };
 
 #ifdef ESP_PLATFORM
@@ -360,12 +370,15 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
                 str = phy_data.usb_product;
             }
         }
+        else if (index >= 5 && string_desc_itf[index - 5] != NULL) {
+            str = string_desc_itf[index - 5];
+        }
 
         uint8_t buff_avail = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1;
         if (index >= 4) {
             const char *product = phy_data.usb_product_present ? phy_data.usb_product : string_desc_arr[2];
-            uint8_t len = MIN(strlen(product), buff_avail);
-            for (int ix = 0; ix < len; chr_count++, ix++) {
+            uint8_t len = (uint8_t)MIN(strlen(product), buff_avail);
+            for (size_t ix = 0; ix < len; chr_count++, ix++) {
                 _desc_str[1 + chr_count] = product[ix];
             }
             buff_avail -= len;
@@ -374,7 +387,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
                 buff_avail--;
             }
         }
-        for (int ix = 0; ix < MIN(strlen(str), buff_avail); chr_count++, ix++) {
+        for (size_t ix = 0; ix < MIN(strlen(str), buff_avail); chr_count++, ix++) {
             _desc_str[1 + chr_count] = str[ix];
         }
     }

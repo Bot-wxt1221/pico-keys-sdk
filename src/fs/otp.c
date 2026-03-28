@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "file.h"
@@ -27,6 +27,7 @@
 #endif
 #include "random.h"
 #include "mbedtls/ecdsa.h"
+#include <stdalign.h>
 
 #ifdef PICO_RP2350
 
@@ -39,35 +40,35 @@ static bool is_empty_buffer(const uint8_t *buffer, uint16_t buffer_len) {
     return true;
 }
 
-static int otp_write_data_mode(uint16_t row, uint8_t *data, uint16_t len, bool is_ecc) {
+static int otp_write_data_mode(uint16_t row, const uint8_t *data, uint16_t len, bool is_ecc) {
     otp_cmd_t cmd = { .flags = row | (is_ecc ? OTP_CMD_ECC_BITS : 0) | OTP_CMD_WRITE_BITS };
-    uint32_t ret = rom_func_otp_access(data, len, cmd);
+    uint32_t ret = rom_func_otp_access((uint8_t *)data, len, cmd);
     if (ret) {
         printf("OTP Write failed with error: %ld\n", ret);
     }
     return ret;
 }
 
-int otp_write_data(uint16_t row, uint8_t *data, uint16_t len) {
+int otp_write_data(uint16_t row, const uint8_t *data, uint16_t len) {
     return otp_write_data_mode(row, data, len, true);
 }
 
-int otp_write_data_raw(uint16_t row, uint8_t *data, uint16_t len) {
+int otp_write_data_raw(uint16_t row, const uint8_t *data, uint16_t len) {
     return otp_write_data_mode(row, data, len, false);
 }
 
-uint8_t* otp_buffer(uint16_t row) {
+const uint8_t* otp_buffer(uint16_t row) {
     volatile uint32_t *p = ((uint32_t *)(OTP_DATA_BASE + (row*2)));
-    return (uint8_t *)p;
+    return (const uint8_t *)p;
 }
 
-uint8_t* otp_buffer_raw(uint16_t row) {
+const uint8_t* otp_buffer_raw(uint16_t row) {
     volatile uint32_t *p = ((uint32_t *)(OTP_DATA_RAW_BASE + (row*4)));
-    return (uint8_t *)p;
+    return (const uint8_t *)p;
 }
 
 bool is_empty_otp_buffer(uint16_t row, uint16_t len) {
-    return is_empty_buffer(otp_buffer(row), len);
+    return is_empty_buffer(otp_buffer_raw(row), len * 2);
 }
 
 static bool is_otp_locked_page(uint8_t page) {
@@ -77,7 +78,7 @@ static bool is_otp_locked_page(uint8_t page) {
 
 static void otp_lock_page(uint8_t page) {
     if (!is_otp_locked_page(page)) {
-        uint32_t value = 0x3c3c3c;
+        alignas(4) uint32_t value = 0x3c3c3c;
         otp_write_data_raw(OTP_DATA_PAGE0_LOCK0_ROW + page*2 + 1, (uint8_t *)&value, sizeof(value));
     }
 
@@ -89,6 +90,137 @@ static void otp_lock_page(uint8_t page) {
 
 uint8_t _otp_key_1[32] = {0};
 uint8_t _otp_key_2[32] = {0};
+
+static const uint8_t esp_secure_boot_digest[32] = {
+    0x0c, 0x1e, 0xce, 0xf3, 0xb4, 0x8f, 0x4a, 0x81,
+    0x45, 0x6c, 0x85, 0x39, 0x15, 0xcc, 0x05, 0x36,
+    0xbe, 0x23, 0x24, 0xee, 0xac, 0x8e, 0x3b, 0xb5,
+    0x77, 0x6f, 0x2d, 0xb9, 0x62, 0x38, 0x75, 0x6a
+};
+
+static esp_efuse_purpose_t esp_secure_boot_purpose(uint8_t digest_idx) {
+    switch (digest_idx) {
+        case 0: return ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST0;
+        case 1: return ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST1;
+        case 2: return ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST2;
+        default: return ESP_EFUSE_KEY_PURPOSE_MAX;
+    }
+}
+
+static bool esp_find_secure_boot_block(uint8_t digest_idx, esp_efuse_block_t *out_block) {
+    esp_efuse_purpose_t purpose = esp_secure_boot_purpose(digest_idx);
+    if (purpose == ESP_EFUSE_KEY_PURPOSE_MAX) {
+        return false;
+    }
+    for (esp_efuse_block_t blk = EFUSE_BLK_KEY0; blk < EFUSE_BLK_KEY_MAX; blk++) {
+        if (esp_efuse_get_key_purpose(blk) == purpose) {
+            if (out_block) {
+                *out_block = blk;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static esp_err_t esp_provision_secure_boot_digest(uint8_t digest_idx, esp_efuse_block_t *out_block) {
+    esp_efuse_purpose_t purpose = esp_secure_boot_purpose(digest_idx);
+    if (purpose == ESP_EFUSE_KEY_PURPOSE_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_efuse_block_t block = EFUSE_BLK_KEY_MAX;
+    if (esp_find_secure_boot_block(digest_idx, &block)) {
+        const esp_efuse_desc_t **key_desc = esp_efuse_get_key(block);
+        if (!key_desc) {
+            return ESP_FAIL;
+        }
+        uint8_t existing[32] = {0};
+        esp_err_t err = esp_efuse_read_field_blob(key_desc, existing, sizeof(existing) * 8);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (memcmp(existing, esp_secure_boot_digest, sizeof(existing)) != 0) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (out_block) {
+            *out_block = block;
+        }
+        return ESP_OK;
+    }
+
+    block = esp_efuse_find_unused_key_block();
+    if (block == EFUSE_BLK_KEY_MAX) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    esp_err_t err = esp_efuse_batch_write_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_efuse_set_key_purpose(block, purpose);
+    if (err == ESP_OK) {
+        const esp_efuse_desc_t **key_desc = esp_efuse_get_key(block);
+        if (!key_desc) {
+            err = ESP_FAIL;
+        } else {
+            err = esp_efuse_write_field_blob(key_desc, esp_secure_boot_digest, sizeof(esp_secure_boot_digest) * 8);
+        }
+    }
+
+    if (err == ESP_OK) {
+        err = esp_efuse_batch_write_commit();
+    } else {
+        esp_efuse_batch_write_cancel();
+    }
+
+    if (err == ESP_OK && out_block) {
+        *out_block = block;
+    }
+    return err;
+}
+
+static esp_err_t esp_disable_debug_interfaces(void) {
+    esp_err_t err = ESP_OK;
+
+#ifdef ESP_EFUSE_SOFT_DIS_JTAG
+    err = esp_efuse_write_field_bit(ESP_EFUSE_SOFT_DIS_JTAG);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+#ifdef ESP_EFUSE_HARD_DIS_JTAG
+    err = esp_efuse_write_field_bit(ESP_EFUSE_HARD_DIS_JTAG);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+#ifdef ESP_EFUSE_DIS_USB_JTAG
+    err = esp_efuse_write_field_bit(ESP_EFUSE_DIS_USB_JTAG);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+#ifdef ESP_EFUSE_DIS_USB_SERIAL_JTAG
+    err = esp_efuse_write_field_bit(ESP_EFUSE_DIS_USB_SERIAL_JTAG);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+#ifdef ESP_EFUSE_DIS_PAD_JTAG
+    err = esp_efuse_write_field_bit(ESP_EFUSE_DIS_PAD_JTAG);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+    return err;
+}
 
 esp_err_t read_key_from_efuse(esp_efuse_block_t block, uint8_t *key, size_t key_len) {
     const esp_efuse_desc_t **key_desc = esp_efuse_get_key(block);
@@ -112,7 +244,7 @@ typedef int otp_ret_t;
 #define OTP_EMTPY(ROW, LEN) is_empty_otp_buffer(ROW, LEN)
 #elif defined(ESP_PLATFORM)
 typedef esp_err_t otp_ret_t;
-#define OTP_WRITE(ROW, DATA, LEN) esp_efuse_write_key(ROW, ESP_EFUSE_KEY_PURPOSE_USER, DATA, LEN);
+#define OTP_WRITE(ROW, DATA, LEN) esp_efuse_write_key(ROW, ESP_EFUSE_KEY_PURPOSE_USER, DATA, LEN)
 #define OTP_READ(ROW, PTR) do { \
     esp_err_t ret = read_key_from_efuse(ROW, _##PTR, sizeof(_##PTR)); \
     if (ret != ESP_OK) { printf("Error reading OTP key 1 [%d]\n", ret); } \
@@ -123,17 +255,108 @@ typedef esp_err_t otp_ret_t;
 #ifndef SECURE_BOOT_BOOTKEY_INDEX
 #define SECURE_BOOT_BOOTKEY_INDEX 0
 #endif
+#ifndef PICO_KEYS_REQUIRE_SECURE_BOOT_BEFORE_LOCK
+#define PICO_KEYS_REQUIRE_SECURE_BOOT_BEFORE_LOCK 1
+#endif
+
+bool otp_is_secure_boot_enabled(uint8_t *bootkey) {
+    (void)bootkey;
+#ifdef PICO_RP2350
+    const uint8_t *crit1 = otp_buffer(OTP_DATA_CRIT1_ROW);
+    if ((crit1[0] & (1 << OTP_DATA_CRIT1_SECURE_BOOT_ENABLE_LSB)) == 0) {
+        return false;
+    }
+	alignas(2) uint8_t BOOTKEY[32] = {
+        0xE1, 0xD1, 0x6B, 0xA7, 0x64, 0xAB, 0xD7, 0x12,
+        0xD4, 0xEF, 0x6E, 0x3E, 0xDD, 0x74, 0x4E, 0xD5,
+        0x63, 0x8C, 0x26, 0x0B, 0x77, 0x1C, 0xF9, 0x81,
+        0x51, 0x11, 0x0B, 0xAF, 0xAC, 0x9B, 0xC8, 0x71
+    };
+    uint8_t bootkey_idx = 0;
+    for (; bootkey_idx < 6; bootkey_idx++) {
+        const uint8_t *bootkey_row = otp_buffer(OTP_DATA_BOOTKEY0_0_ROW + 0x10 * bootkey_idx);
+        if (memcmp(bootkey_row, BOOTKEY, sizeof(BOOTKEY)) == 0) {
+            break;
+        }
+    }
+    if (bootkey_idx == 6) {
+        return false;
+    }
+    const uint8_t *boot_flags1 = otp_buffer(OTP_DATA_BOOT_FLAGS1_ROW);
+    if ((boot_flags1[0] & (1 << (bootkey_idx + OTP_DATA_BOOT_FLAGS1_KEY_VALID_LSB))) == 0) {
+        return false;
+    }
+    if (bootkey) {
+        *bootkey = bootkey_idx;
+    }
+    return true;
+#elif defined(ESP_PLATFORM)
+    if (!esp_efuse_read_field_bit(ESP_EFUSE_SECURE_BOOT_EN)) {
+        return false;
+    }
+
+    uint8_t preferred = SECURE_BOOT_BOOTKEY_INDEX;
+    if (preferred <= 2 && esp_find_secure_boot_block(preferred, NULL)
+        && !esp_efuse_get_digest_revoke(preferred)) {
+        if (bootkey) {
+            *bootkey = preferred;
+        }
+        return true;
+    }
+
+    for (uint8_t idx = 0; idx <= 2; idx++) {
+        if (esp_find_secure_boot_block(idx, NULL) && !esp_efuse_get_digest_revoke(idx)) {
+            if (bootkey) {
+                *bootkey = idx;
+            }
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+bool otp_is_secure_boot_locked(void) {
+    uint8_t bootkey_idx = 0xFF;
+    if (otp_is_secure_boot_enabled(&bootkey_idx) == false) {
+        return false;
+    }
+#ifdef PICO_RP2350
+    const uint8_t *boot_flags1 = otp_buffer_raw(OTP_DATA_BOOT_FLAGS1_ROW);
+    if ((boot_flags1[1] & ((OTP_DATA_BOOT_FLAGS1_KEY_INVALID_BITS >> OTP_DATA_BOOT_FLAGS1_KEY_INVALID_LSB) & (~(1 << bootkey_idx)))) != ((OTP_DATA_BOOT_FLAGS1_KEY_INVALID_BITS >> OTP_DATA_BOOT_FLAGS1_KEY_INVALID_LSB) & (~(1 << bootkey_idx)))) {
+        return false;
+    }
+    const uint8_t *crit1 = otp_buffer_raw(OTP_DATA_CRIT1_ROW);
+    if ((crit1[0] & (1 << OTP_DATA_CRIT1_DEBUG_DISABLE_LSB)) == 0
+        || (crit1[0] & (1 << OTP_DATA_CRIT1_GLITCH_DETECTOR_ENABLE_LSB)) == 0
+        || ((crit1[0] & (3 << OTP_DATA_CRIT1_GLITCH_DETECTOR_SENS_LSB)) != (3 << OTP_DATA_CRIT1_GLITCH_DETECTOR_SENS_LSB))) {
+        return false;
+    }
+    return bootkey_idx != 0xFF;
+#elif defined(ESP_PLATFORM)
+    for (uint8_t idx = 0; idx <= 2; idx++) {
+        if (idx == bootkey_idx) {
+            continue;
+        }
+        if (!esp_efuse_get_digest_revoke(idx)) {
+            return false;
+        }
+    }
+    return true;
+#endif
+    return false;
+}
 
 int otp_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
     int ret = 0;
 #ifdef PICO_RP2350
-    uint8_t BOOTKEY[] = "\xe1\xd1\x6b\xa7\x64\xab\xd7\x12\xd4\xef\x6e\x3e\xdd\x74\x4e\xd5\x63\x8c\x26\xb\x77\x1c\xf9\x81\x51\x11\xb\xaf\xac\x9b\xc8\x71";
+    alignas(2) uint8_t BOOTKEY[] = "\xe1\xd1\x6b\xa7\x64\xab\xd7\x12\xd4\xef\x6e\x3e\xdd\x74\x4e\xd5\x63\x8c\x26\xb\x77\x1c\xf9\x81\x51\x11\xb\xaf\xac\x9b\xc8\x71";
     if (is_empty_otp_buffer(OTP_DATA_BOOTKEY0_0_ROW + 0x10*bootkey, 32)) {
         PICOKEY_CHECK(otp_write_data(OTP_DATA_BOOTKEY0_0_ROW + 0x10*bootkey, BOOTKEY, sizeof(BOOTKEY)));
     }
 
-    uint8_t *boot_flags1 = otp_buffer_raw(OTP_DATA_BOOT_FLAGS1_ROW);
-    uint8_t flagsb1[] = { boot_flags1[0] | (1 << (bootkey + OTP_DATA_BOOT_FLAGS1_KEY_VALID_LSB)), boot_flags1[1], boot_flags1[2], 0x00 };
+    const uint8_t *boot_flags1 = otp_buffer_raw(OTP_DATA_BOOT_FLAGS1_ROW);
+    alignas(4) uint8_t flagsb1[] = { boot_flags1[0] | (1 << (bootkey + OTP_DATA_BOOT_FLAGS1_KEY_VALID_LSB)), boot_flags1[1], boot_flags1[2], 0x00 };
     if (secure_lock) {
         flagsb1[1] |= ((OTP_DATA_BOOT_FLAGS1_KEY_INVALID_BITS >> OTP_DATA_BOOT_FLAGS1_KEY_INVALID_LSB) & (~(1 << bootkey)));
     }
@@ -142,8 +365,8 @@ int otp_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
     PICOKEY_CHECK(otp_write_data_raw(OTP_DATA_BOOT_FLAGS1_R1_ROW, flagsb1, sizeof(flagsb1)));
     PICOKEY_CHECK(otp_write_data_raw(OTP_DATA_BOOT_FLAGS1_R2_ROW, flagsb1, sizeof(flagsb1)));
 
-    uint8_t *crit1 = otp_buffer_raw(OTP_DATA_CRIT1_ROW);
-    uint8_t flagsc1[] = { crit1[0] | (1 << OTP_DATA_CRIT1_SECURE_BOOT_ENABLE_LSB), crit1[1], crit1[2], 0x00 };
+    const uint8_t *crit1 = otp_buffer_raw(OTP_DATA_CRIT1_ROW);
+    alignas(4) uint8_t flagsc1[] = { crit1[0] | (1 << OTP_DATA_CRIT1_SECURE_BOOT_ENABLE_LSB), crit1[1], crit1[2], 0x00 };
     if (secure_lock) {
         flagsc1[0] |= (1 << OTP_DATA_CRIT1_DEBUG_DISABLE_LSB);
         flagsc1[0] |= (1 << OTP_DATA_CRIT1_GLITCH_DETECTOR_ENABLE_LSB);
@@ -159,17 +382,82 @@ int otp_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
     PICOKEY_CHECK(otp_write_data_raw(OTP_DATA_CRIT1_R7_ROW, flagsc1, sizeof(flagsc1)));
 
     if (secure_lock) {
-        uint8_t *page1 = otp_buffer_raw(OTP_DATA_PAGE1_LOCK1_ROW);
+        const uint8_t *page1 = otp_buffer_raw(OTP_DATA_PAGE1_LOCK1_ROW);
         uint8_t page1v = page1[0] | (OTP_DATA_PAGE1_LOCK1_LOCK_BL_VALUE_READ_ONLY << OTP_DATA_PAGE1_LOCK1_LOCK_BL_LSB);
-        uint8_t flagsp1[] = { page1v, page1v, page1v, 0x00 };
+        alignas(4) uint8_t flagsp1[] = { page1v, page1v, page1v, 0x00 };
         PICOKEY_CHECK(otp_write_data_raw(OTP_DATA_PAGE1_LOCK1_ROW, flagsp1, sizeof(flagsp1)));
-        uint8_t *page2 = otp_buffer_raw(OTP_DATA_PAGE2_LOCK1_ROW);
+        const uint8_t *page2 = otp_buffer_raw(OTP_DATA_PAGE2_LOCK1_ROW);
         uint8_t page2v = page2[0] | (OTP_DATA_PAGE2_LOCK1_LOCK_BL_VALUE_READ_ONLY << OTP_DATA_PAGE2_LOCK1_LOCK_BL_LSB);
-        uint8_t flagsp2[] = { page2v, page2v, page2v, 0x00 };
+        alignas(4) uint8_t flagsp2[] = { page2v, page2v, page2v, 0x00 };
         PICOKEY_CHECK(otp_write_data_raw(OTP_DATA_PAGE2_LOCK1_ROW, flagsp2, sizeof(flagsp2)));
     }
 #elif defined(ESP_PLATFORM)
-    // TODO: Implement secure boot for ESP32-S3
+    if (bootkey > 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (secure_lock && PICO_KEYS_REQUIRE_SECURE_BOOT_BEFORE_LOCK) {
+        if (!esp_efuse_read_field_bit(ESP_EFUSE_SECURE_BOOT_EN)) {
+            printf("Secure lock requires SECURE_BOOT_EN already set. Enable secure boot first.\n");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
+    esp_efuse_block_t key_block = EFUSE_BLK_KEY_MAX;
+    esp_err_t err = esp_provision_secure_boot_digest(bootkey, &key_block);
+    if (err != ESP_OK) {
+        printf("Error provisioning secure boot digest %u [%d]\n", bootkey, err);
+        return err;
+    }
+
+    if (!esp_efuse_read_field_bit(ESP_EFUSE_SECURE_BOOT_EN)) {
+        err = esp_efuse_write_field_bit(ESP_EFUSE_SECURE_BOOT_EN);
+        if (err != ESP_OK) {
+            printf("Error enabling secure boot [%d]\n", err);
+            return err;
+        }
+    }
+
+    if (secure_lock) {
+        for (uint8_t idx = 0; idx <= 2; idx++) {
+            if (idx == bootkey) {
+                continue;
+            }
+            err = esp_efuse_set_digest_revoke(idx);
+            if (err != ESP_OK) {
+                printf("Error revoking secure boot digest %u [%d]\n", idx, err);
+                return err;
+            }
+        }
+
+        err = esp_efuse_set_key_dis_write(key_block);
+        if (err != ESP_OK) {
+            printf("Error setting secure boot key block read only [%d]\n", err);
+            return err;
+        }
+        err = esp_efuse_set_keypurpose_dis_write(key_block);
+        if (err != ESP_OK) {
+            printf("Error setting secure boot key purpose read only [%d]\n", err);
+            return err;
+        }
+
+        /* // Not sure if it allows future upgrades if ROM download mode is disabled, so leaving it enabled for now
+        err = esp_efuse_disable_rom_download_mode();
+        if (err != ESP_OK) {
+            printf("Error disabling ROM download mode [%d]\n", err);
+            return err;
+        }
+        */
+
+        err = esp_disable_debug_interfaces();
+        if (err != ESP_OK) {
+            printf("Error disabling JTAG interfaces [%d]\n", err);
+            return err;
+        }
+    }
+#else
+    (void)bootkey;
+    (void)secure_lock;
 #endif // PICO_RP2350
     goto err;
     err:
@@ -179,7 +467,63 @@ int otp_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
     return PICOKEY_OK;
 }
 
-void init_otp_files() {
+#ifdef PICO_RP2350
+static void otp_invalidate_key(uint16_t row, uint16_t len) {
+    if (!is_empty_otp_buffer(row, len)) {
+        uint8_t *inval = (uint8_t *)calloc(len * 2, sizeof(uint8_t));
+        if (inval) {
+            memset(inval, 0xFF, len * 2);
+            otp_write_data_raw(row, inval, len * 2);
+            free(inval);
+        }
+    }
+}
+
+static otp_ret_t otp_chaff(uint16_t row, uint16_t len) {
+    const uint8_t *raw = otp_buffer_raw(row);
+    uint8_t *chaff = (uint8_t *)calloc(len * 2, sizeof(uint8_t));
+    if (chaff) {
+        memcpy(chaff, raw, len * 2);
+        for (int i = 0; i < len * 2; i++) {
+            chaff[i] ^= 0xFF;
+        }
+        otp_ret_t ret = otp_write_data_raw(row + 32, chaff, len * 2);
+        free(chaff);
+        return ret;
+    }
+    return BOOTROM_ERROR_INVALID_STATE;
+}
+
+static otp_ret_t otp_migrate_key(uint16_t new_row, uint16_t old_row, uint16_t len) {
+    if (is_empty_otp_buffer(new_row, len) && !is_empty_otp_buffer(old_row, len)) {
+        const uint8_t *key = otp_buffer(old_row);
+        uint8_t *new_key = (uint8_t *)calloc(len, sizeof(uint8_t));
+        if (new_key) {
+            memcpy(new_key, key, len);
+            otp_ret_t ret = otp_write_data(new_row, new_key, len);
+            if (ret == BOOTROM_OK) {
+                otp_chaff(new_row, len);
+                otp_invalidate_key(old_row, 32);
+            }
+            free(new_key);
+            return ret;
+        }
+    }
+    return BOOTROM_ERROR_INVALID_STATE;
+}
+
+static void otp_migrate_chaff(void) {
+    otp_migrate_key(OTP_MKEK_ROW, OTP_OLD_MKEK_ROW, 32);
+    otp_migrate_key(OTP_DEVK_ROW, OTP_OLD_DEVK_ROW, 32);
+    otp_lock_page(OTP_MKEK_ROW >> 6);
+}
+#endif
+
+void init_otp_files(void) {
+
+#ifdef PICO_RP2350
+    otp_migrate_chaff();
+#endif
 
 #if defined(PICO_RP2350) || defined(ESP_PLATFORM)
     otp_ret_t ret = 0;
@@ -191,6 +535,9 @@ void init_otp_files() {
         if (ret != 0) {
             printf("Error writing OTP key 1 [%d]\n", ret);
         }
+#ifdef PICO_RP2350
+        otp_chaff(OTP_KEY_1, 32);
+#endif
         write_otp[0] = OTP_KEY_1;
     }
     OTP_READ(OTP_KEY_1, otp_key_1);
@@ -210,11 +557,15 @@ void init_otp_files() {
         if (ret != 0) {
             printf("Error writing OTP key 2 [%d]\n", ret);
         }
+        mbedtls_platform_zeroize(pkey, sizeof(pkey));
+#ifdef PICO_RP2350
+        otp_chaff(OTP_KEY_2, 32);
+#endif
         write_otp[1] = OTP_KEY_2;
     }
     OTP_READ(OTP_KEY_2, otp_key_2);
 
-    for (int i = 0; i < sizeof(write_otp)/sizeof(uint16_t); i++) {
+    for (size_t i = 0; i < sizeof(write_otp) / sizeof(write_otp[0]); i++) {
         if (write_otp[i] != 0xFFFF) {
 #if defined(PICO_RP2350)
             otp_lock_page(write_otp[i] >> 6);
@@ -230,8 +581,7 @@ void init_otp_files() {
 #endif
         }
     }
-#endif // PICO_RP2350 || ESP_PLATFORM
-#ifdef ENABLE_EMULATION
+#elif defined(ENABLE_EMULATION)
     static uint8_t _otp1[32] = {0}, _otp2[32] = {0};
     memset(_otp1, 0xAC, sizeof(_otp1));
     memset(_otp2, 0xBE, sizeof(_otp2));

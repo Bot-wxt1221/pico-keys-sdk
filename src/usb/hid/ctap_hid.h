@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _CTAP_HID_H_
@@ -158,8 +158,11 @@ typedef struct {
 
 extern void add_keyboard_buffer(const uint8_t *, size_t, bool);
 extern void append_keyboard_buffer(const uint8_t *data, size_t data_len);
+extern int driver_init_hid(void);
+extern int ctap_error(uint8_t error);
+extern uint16_t *get_send_buffer_size(uint8_t itf);
 
-extern bool is_nitrokey;
+extern bool is_nk;
 
 #ifdef __cplusplus
 }

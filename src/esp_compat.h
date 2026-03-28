@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef __ESP_COMPAT_H_
@@ -37,7 +37,12 @@ extern TaskHandle_t hcore0, hcore1;
 #define ESP32_CORE0 tskNO_AFFINITY
 #define ESP32_CORE1 tskNO_AFFINITY
 #endif
-#define multicore_launch_core1(a) xTaskCreatePinnedToCore((void(*)(void *))a, "core1", 4096*ITF_TOTAL*2, NULL, CONFIG_TINYUSB_TASK_PRIORITY - 2, &hcore1, ESP32_CORE1)
+static inline void task_wrapper(void *arg) {
+    void* (*func)(void*) = (void* (*)(void*))arg;
+    func(NULL);
+    vTaskDelete(NULL);
+}
+#define multicore_launch_func_core1(func) xTaskCreatePinnedToCore(task_wrapper, "core1", 4096*ITF_TOTAL*2, (void *)func, CONFIG_TINYUSB_TASK_PRIORITY - 2, &hcore1, ESP32_CORE1)
 #define multicore_reset_core1() do { if (hcore1) { eTaskState e = eTaskGetState(hcore1); if (e <= eSuspended) { vTaskDelete(hcore1); }} }while(0)
 #define sleep_ms(a) vTaskDelay(a / portTICK_PERIOD_MS)
 static inline uint32_t board_millis(void) {

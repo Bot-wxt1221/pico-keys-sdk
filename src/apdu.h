@@ -3,23 +3,23 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _APDU_H_
 #define _APDU_H_
 
 #include <stdlib.h>
-#if !defined(ENABLE_EMULATION) && !defined(ESP_PLATFORM)
+#if defined(PICO_PLATFORM)
 #include "pico/stdlib.h"
 #endif
 #include "compat.h"
@@ -29,9 +29,9 @@
 
 typedef struct app {
     const uint8_t *aid;
-    int (*process_apdu)();
+    int (*process_apdu)(void);
     int (*select_aid)(struct app *, uint8_t);
-    int (*unload)();
+    int (*unload)(void);
 } app_t;
 
 extern bool app_exists(const uint8_t *aid, size_t aid_len);
@@ -40,11 +40,11 @@ extern int select_app(const uint8_t *aid, size_t aid_len);
 
 typedef struct cmd {
     uint8_t ins;
-    int (*cmd_handler)();
+    int (*cmd_handler)(void);
 } cmd_t;
 
 extern uint8_t num_apps;
-extern app_t apps[8];
+extern app_t apps[16];
 extern app_t *current_app;
 
 PACK(struct apdu {
@@ -69,10 +69,11 @@ PACK(struct apdu {
 extern struct apdu apdu;
 
 extern uint16_t set_res_sw(uint8_t sw1, uint8_t sw2);
-extern int process_apdu();
+extern int process_apdu(void);
 extern uint16_t apdu_process(uint8_t, const uint8_t *buffer, uint16_t buffer_size);
-extern void apdu_finish();
-extern uint16_t apdu_next();
-extern void apdu_thread();
+extern void apdu_finish(void);
+extern uint16_t apdu_next(void);
+extern void *apdu_thread(void *);
+extern int bulk_cmd(int (*cmd)(void));
 
 #endif

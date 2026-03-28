@@ -3,16 +3,16 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "apdu.h"
@@ -30,16 +30,18 @@ uint8_t *rdata_gr = NULL;
 uint16_t rdata_bk = 0x0;
 extern uint32_t timeout;
 bool is_chaining = false;
-uint8_t chain_buf[4096];
+uint8_t chain_buf[2038];
 uint8_t *chain_ptr = NULL;
 
-int process_apdu() {
+int process_apdu(void) {
     led_set_mode(MODE_PROCESSING);
     if (CLA(apdu) & 0x10) {
+        size_t chain_used = 0;
         if (!is_chaining) {
             chain_ptr = chain_buf;
         }
-        if (chain_ptr - chain_buf + apdu.nc >= sizeof(chain_buf)) {
+        chain_used = (size_t)(chain_ptr - chain_buf);
+        if (chain_used + apdu.nc >= sizeof(chain_buf)) {
             return SW_CLA_NOT_SUPPORTED();
         }
         memcpy(chain_ptr, apdu.data, apdu.nc);
@@ -113,21 +115,22 @@ uint16_t apdu_process(uint8_t itf, const uint8_t *buffer, uint16_t buffer_size) 
             }
         }
     }
-    //printf("apdu.nc %ld, apdu.ne %ld\n",apdu.nc,apdu.ne);
+    //printf("apdu.nc %u, apdu.ne %u\n",apdu.nc,apdu.ne);
     if (apdu.header[1] == 0xc0) {
         //printf("apdu.ne %u, apdu.rlen %d, bk %x\n",apdu.ne,apdu.rlen,rdata_bk);
         timeout_stop();
-        *(uint16_t *) rdata_gr = rdata_bk;
+        rdata_gr[0] = rdata_bk >> 8;
+        rdata_gr[1] = rdata_bk & 0xff;
         if (apdu.rlen <= apdu.ne) {
 #ifndef ENABLE_EMULATION
 #ifdef USB_ITF_HID
             if (itf == ITF_HID_CTAP) {
-                driver_exec_finished_cont_hid(itf, apdu.rlen + 2, rdata_gr - apdu.rdata);
+                driver_exec_finished_cont_hid(itf, apdu.rlen + 2, (uint16_t)(rdata_gr - apdu.rdata));
             }
 #endif
 #ifdef USB_ITF_CCID
             if (itf == ITF_SC_CCID || itf == ITF_SC_WCID) {
-                driver_exec_finished_cont_ccid(itf, apdu.rlen + 2, rdata_gr - apdu.rdata);
+                driver_exec_finished_cont_ccid(itf, apdu.rlen + 2, (uint16_t)(rdata_gr - apdu.rdata));
             }
 #endif
 #else
@@ -140,7 +143,7 @@ uint16_t apdu_process(uint8_t itf, const uint8_t *buffer, uint16_t buffer_size) 
         }
         else {
             rdata_gr += apdu.ne;
-            rdata_bk = *(uint16_t *) rdata_gr;
+            rdata_bk = (rdata_gr[0] << 8) | rdata_gr[1];
             rdata_gr[0] = 0x61;
             if (apdu.rlen - apdu.ne >= 256) {
                 rdata_gr[1] = 0;
@@ -151,12 +154,12 @@ uint16_t apdu_process(uint8_t itf, const uint8_t *buffer, uint16_t buffer_size) 
 #ifndef ENABLE_EMULATION
 #ifdef USB_ITF_HID
             if (itf == ITF_HID_CTAP) {
-                driver_exec_finished_cont_hid(itf, apdu.ne + 2, rdata_gr - apdu.ne - apdu.rdata);
+                driver_exec_finished_cont_hid(itf, (uint16_t)(apdu.ne + 2), (uint16_t)(rdata_gr - apdu.ne - apdu.rdata));
             }
 #endif
 #ifdef USB_ITF_CCID
             if (itf == ITF_SC_CCID || itf == ITF_SC_WCID) {
-                driver_exec_finished_cont_ccid(itf, apdu.ne + 2, rdata_gr - apdu.ne - apdu.rdata);
+                driver_exec_finished_cont_ccid(itf, (uint16_t)(apdu.ne + 2), (uint16_t)(rdata_gr - apdu.ne - apdu.rdata));
             }
 #endif
 #else
@@ -182,13 +185,16 @@ uint16_t set_res_sw(uint8_t sw1, uint8_t sw2) {
     return make_uint16_t_be(sw1, sw2);
 }
 
-void apdu_thread(void) {
+void *apdu_thread(void *arg) {
+    (void)arg;
     card_init_core1();
     while (1) {
         uint32_t m = 0;
         queue_remove_blocking(&usb_to_card_q, &m);
         uint32_t flag = m + 1;
-        queue_add_blocking(&card_to_usb_q, &flag);
+        if (m != EV_CMD_AVAILABLE) {
+            queue_add_blocking(&card_to_usb_q, &flag);
+        }
 
         if (m == EV_VERIFY_CMD_AVAILABLE || m == EV_MODIFY_CMD_AVAILABLE) {
             set_res_sw(0x6f, 0x00);
@@ -215,12 +221,10 @@ done:   ;
         current_app->unload();
         current_app = NULL;
     }
-#ifdef ESP_PLATFORM
-    vTaskDelete(NULL);
-#endif
+    return NULL;
 }
 
-void apdu_finish() {
+void apdu_finish(void) {
     put_uint16_t_be(apdu.sw, apdu.rdata + apdu.rlen);
     // timeout_stop();
 #ifndef ENABLE_EMULATION
@@ -231,14 +235,14 @@ void apdu_finish() {
 #endif
 }
 
-uint16_t apdu_next() {
+uint16_t apdu_next(void) {
     if (apdu.sw != 0) {
         if (apdu.rlen <= apdu.ne) {
             return apdu.rlen + 2;
         }
         else {
             rdata_gr = apdu.rdata + apdu.ne;
-            rdata_bk = *(uint16_t *) rdata_gr;
+            rdata_bk = (rdata_gr[0] << 8) | rdata_gr[1];
             rdata_gr[0] = 0x61;
             if (apdu.rlen - apdu.ne >= 256) {
                 rdata_gr[1] = 0;
@@ -251,4 +255,31 @@ uint16_t apdu_next() {
         return (uint16_t)(apdu.ne + 2);
     }
     return 0;
+}
+
+int bulk_cmd(int (*cmd)(void)) {
+    uint8_t *p = apdu.data;
+    uint8_t *rapdu = apdu.rdata;
+    uint16_t rapdu_size = 0;
+    uint8_t *top = apdu.data + apdu.nc;
+    while (p < top) {
+        P1(apdu) = p[0];
+        P2(apdu) = p[1];
+        apdu.nc = p[2];
+        apdu.data = p + 3;
+        *apdu.rdata++ = p[0];
+        *apdu.rdata++ = p[1];
+        *apdu.rdata++ = 0;
+        *apdu.rdata++ = 0;
+        apdu.rlen = 0;
+        cmd();
+        put_uint16_t_be(apdu.rlen, apdu.rdata - 2);
+        put_uint16_t_be(apdu.sw, apdu.rdata + apdu.rlen);
+        rapdu_size += 4 + apdu.rlen + 2;
+        apdu.rdata += apdu.rlen + 2;
+        p += 3 + apdu.nc;
+    }
+    apdu.rlen = rapdu_size;
+    apdu.rdata = rapdu;
+    return SW_OK();
 }

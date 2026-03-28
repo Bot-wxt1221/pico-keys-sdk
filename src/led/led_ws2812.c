@@ -3,22 +3,21 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "pico_keys.h"
 
-#ifdef PICO_DEFAULT_WS2812_PIN
-
+#ifdef PICO_PLATFORM
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 
@@ -70,11 +69,14 @@ static inline void ws2812_program_init(PIO pio, uint sm, uint offset, uint pin, 
     pio_sm_set_enabled(pio, sm, true);
 }
 
-void led_driver_init() {
+static void led_driver_init_ws2812(void) {
     PIO pio = pio0;
     int sm = 0;
     uint offset = pio_add_program(pio, &ws2812_program);
-    uint8_t gpio = PICO_DEFAULT_WS2812_PIN;
+    uint8_t gpio = 0;
+#ifdef PICO_DEFAULT_WS2812_PIN
+    gpio = PICO_DEFAULT_WS2812_PIN;
+#endif
     if (phy_data.led_gpio_present) {
         gpio = phy_data.led_gpio;
     }
@@ -113,7 +115,7 @@ static inline void ws2812_put_pixel(uint32_t u32_pixel) {
     pio_sm_put_blocking(pio0, 0, u32_pixel << 8u);
 }
 
-void led_driver_color(uint8_t color, uint32_t led_brightness, float progress) {
+static void led_driver_color_ws2812(uint8_t color, uint32_t led_brightness, float progress) {
     if (!(phy_data.opts & PHY_OPT_DIMM)) {
         progress = progress >= 0.5 ? 1 : 0;
     }
@@ -127,5 +129,10 @@ void led_driver_color(uint8_t color, uint32_t led_brightness, float progress) {
 
     ws2812_put_pixel(urgb_u32(pixel_color.r, pixel_color.g, pixel_color.b));
 }
+
+led_driver_t led_driver_ws2812 = {
+    .init = led_driver_init_ws2812,
+    .set_color = led_driver_color_ws2812,
+};
 
 #endif

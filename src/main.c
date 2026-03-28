@@ -3,33 +3,34 @@
  * Copyright (c) 2022 Pol Henarejos.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, version 3.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
+ * Affero General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "pico_keys.h"
 
-// Pico
-
+#if !defined(ENABLE_EMULATION)
+#include "tusb.h"
+#endif
 #if defined(ENABLE_EMULATION)
 #include "emulation.h"
 #elif defined(ESP_PLATFORM)
-#include "tusb.h"
 #include "driver/gpio.h"
 #include "rom/gpio.h"
 #include "tinyusb.h"
 #include "esp_efuse.h"
 #define BOOT_PIN GPIO_NUM_0
-#else
+#elif defined(PICO_PLATFORM)
 #include "pico/stdlib.h"
 #include "bsp/board.h"
 #include "pico/aon_timer.h"
@@ -40,14 +41,14 @@
 #endif
 
 #include "random.h"
-#include "pico_keys.h"
+#include "hwrng.h"
 #include "apdu.h"
 #include "usb.h"
-extern void do_flash();
-extern void low_flash_init();
-extern void init_otp_files();
+#include "mbedtls/sha256.h"
 
-app_t apps[8];
+extern void init_otp_files(void);
+
+app_t apps[16];
 uint8_t num_apps = 0;
 
 app_t *current_app = NULL;
@@ -55,11 +56,8 @@ app_t *current_app = NULL;
 const uint8_t *ccid_atr = NULL;
 
 bool app_exists(const uint8_t *aid, size_t aid_len) {
-    if (current_app && current_app->aid && (current_app->aid + 1 == aid || !memcmp(current_app->aid + 1, aid, aid_len))) {
-        return true;
-    }
     for (int a = 0; a < num_apps; a++) {
-        if (!memcmp(apps[a].aid + 1, aid, MIN(aid_len, apps[a].aid[0]))) {
+        if (aid_len >= apps[a].aid[0] && !memcmp(apps[a].aid + 1, aid, apps[a].aid[0])) {
             return true;
         }
     }
@@ -80,14 +78,14 @@ int register_app(int (*select_aid)(app_t *, uint8_t), const uint8_t *aid) {
 }
 
 int select_app(const uint8_t *aid, size_t aid_len) {
-    if (current_app && current_app->aid && (current_app->aid + 1 == aid || !memcmp(current_app->aid + 1, aid, aid_len))) {
+    if (current_app && current_app->aid && (current_app->aid + 1 == aid || (aid_len >= current_app->aid[0] && !memcmp(current_app->aid + 1, aid, current_app->aid[0])))) {
         current_app->select_aid(current_app, 0);
         return PICOKEY_OK;
     }
     for (int a = 0; a < num_apps; a++) {
-        if (!memcmp(apps[a].aid + 1, aid, MIN(aid_len, apps[a].aid[0]))) {
+        if (aid_len >= apps[a].aid[0] && !memcmp(apps[a].aid + 1, aid, apps[a].aid[0])) {
             if (current_app) {
-                if (current_app->aid && !memcmp(current_app->aid + 1, aid, aid_len)) {
+                if (current_app->aid && aid_len >= current_app->aid[0] && !memcmp(current_app->aid + 1, aid, current_app->aid[0])) {
                     current_app->select_aid(current_app, 1);
                     return PICOKEY_OK;
                 }
@@ -106,17 +104,16 @@ int select_app(const uint8_t *aid, size_t aid_len) {
 
 int (*button_pressed_cb)(uint8_t) = NULL;
 
-void execute_tasks();
+static void execute_tasks(void);
 
 static bool req_button_pending = false;
 
-bool is_req_button_pending() {
+bool is_req_button_pending(void) {
     return req_button_pending;
 }
 
 bool cancel_button = false;
 
-#ifdef ENABLE_EMULATION
 #ifdef _MSC_VER
 #include <windows.h>
 struct timezone
@@ -146,14 +143,14 @@ int gettimeofday(struct timeval* tp, struct timezone* tzp)
     return 0;
 }
 #endif
-#else
+#if !defined(ENABLE_EMULATION)
 #ifdef ESP_PLATFORM
-bool picok_board_button_read() {
+static bool picok_board_button_read(void) {
     int boot_state = gpio_get_level(BOOT_PIN);
     return boot_state == 0;
 }
-#else
-bool __no_inline_not_in_flash_func(picok_get_bootsel_button)() {
+#elif defined(PICO_PLATFORM)
+static bool __no_inline_not_in_flash_func(picok_get_bootsel_button)(void) {
     const uint CS_PIN_INDEX = 1;
 
     // Must disable interrupts, as interrupt handlers may be in flash, and we
@@ -170,7 +167,7 @@ bool __no_inline_not_in_flash_func(picok_get_bootsel_button)() {
 
     // The HI GPIO registers in SIO can observe and control the 6 QSPI pins.
     // Note the button pulls the pin *low* when pressed.
-#if PICO_RP2040
+#ifdef PICO_RP2040
     #define CS_BIT (1u << 1)
 #else
     #define CS_BIT SIO_GPIO_HI_IN_QSPI_CSN_BITS
@@ -187,21 +184,27 @@ bool __no_inline_not_in_flash_func(picok_get_bootsel_button)() {
 
     return button_state;
 }
-uint32_t picok_board_button_read(void)
-{
+static bool picok_board_button_read(void) {
   return picok_get_bootsel_button();
+}
+#else
+static bool picok_board_button_read(void) {
+    return true; // always unpressed
 }
 #endif
 bool button_pressed_state = false;
 uint32_t button_pressed_time = 0;
 uint8_t button_press = 0;
-bool wait_button() {
-    uint32_t button_timeout = 15000;
+bool wait_button(void) {
+    /* Disabled by default. As LED may not be properly configured,
+       it will not be possible to indicate button press unless it
+       is commissioned. */
+    uint32_t button_timeout = 0;
     if (phy_data.up_btn_present) {
         button_timeout = phy_data.up_btn * 1000;
-        if (button_timeout == 0) {
-            return false;
-        }
+    }
+    if (button_timeout == 0) {
+        return false;
     }
     uint32_t start_button = board_millis();
     bool timeout = false;
@@ -231,11 +234,45 @@ bool wait_button() {
     req_button_pending = false;
     return timeout || cancel_button;
 }
+
+__attribute__((weak)) int picokey_init(void) {
+    return 0;
+}
+
 #endif
+
+bool set_rtc = false;
+
+bool has_set_rtc(void) {
+    return set_rtc;
+}
+
+void set_rtc_time(time_t t) {
+#ifdef PICO_PLATFORM
+    struct timespec tv = {.tv_sec = t, .tv_nsec = 0};
+    aon_timer_set_time(&tv);
+#else
+    struct timeval tv = {.tv_sec = t, .tv_usec = 0};
+    settimeofday(&tv, NULL);
+#endif
+    set_rtc = true;
+}
+
+time_t get_rtc_time(void) {
+#ifdef PICO_PLATFORM
+    struct timespec tv;
+    aon_timer_get_time(&tv);
+    return tv.tv_sec;
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec;
+#endif
+}
 
 struct apdu apdu;
 
-void init_rtc() {
+static void init_rtc(void) {
 #ifdef PICO_PLATFORM
     struct timespec tv = {0};
     tv.tv_sec = 1577836800; // 2020-01-01
@@ -243,9 +280,7 @@ void init_rtc() {
 #endif
 }
 
-extern void neug_task();
-extern void usb_task();
-void execute_tasks()
+static void execute_tasks(void)
 {
 #if !defined(ENABLE_EMULATION) && !defined(ESP_PLATFORM)
     tud_task(); // tinyusb device task
@@ -254,10 +289,11 @@ void execute_tasks()
     led_blinking_task();
 }
 
-void core0_loop() {
+static void core0_loop(void *arg) {
+    (void)arg;
     while (1) {
         execute_tasks();
-        neug_task();
+        hwrng_task();
         do_flash();
 #ifndef ENABLE_EMULATION
         if (button_pressed_cb && board_millis() > 1000 && !is_busy()) { // wait 1 second to boot up
@@ -286,27 +322,29 @@ void core0_loop() {
 }
 
 char pico_serial_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+uint8_t pico_serial_hash[32];
 pico_unique_board_id_t pico_serial;
 #ifdef ESP_PLATFORM
 #define pico_get_unique_board_id(a) do { uint32_t value; esp_efuse_read_block(EFUSE_BLK1, &value, 0, 32); memcpy((uint8_t *)(a), &value, sizeof(uint32_t)); esp_efuse_read_block(EFUSE_BLK1, &value, 32, 32); memcpy((uint8_t *)(a)+4, &value, sizeof(uint32_t)); } while(0)
 extern tinyusb_config_t tusb_cfg;
 extern const uint8_t desc_config[];
 TaskHandle_t hcore0 = NULL, hcore1 = NULL;
-int app_main() {
+int app_main(void) {
 #else
-#ifdef ENABLE_EMULATION
+#ifndef PICO_PLATFORM
 #define pico_get_unique_board_id(a) memset(a, 0, sizeof(*(a)))
 #endif
 int main(void) {
 #endif
     pico_get_unique_board_id(&pico_serial);
     memset(pico_serial_str, 0, sizeof(pico_serial_str));
-    for (int i = 0; i < sizeof(pico_serial); i++) {
+    for (size_t i = 0; i < sizeof(pico_serial); i++) {
         snprintf(&pico_serial_str[2 * i], 3, "%02X", pico_serial.id[i]);
     }
+    mbedtls_sha256(pico_serial.id, sizeof(pico_serial.id), pico_serial_hash, false);
 
 #ifndef ENABLE_EMULATION
-#ifndef ESP_PLATFORM
+#ifdef PICO_PLATFORM
     board_init();
     stdio_init_all();
 #endif
@@ -358,10 +396,14 @@ int main(void) {
 #endif
 #endif
 
+#ifndef ENABLE_EMULATION
+    picokey_init();
+#endif
+
 #ifdef ESP_PLATFORM
     xTaskCreatePinnedToCore(core0_loop, "core0", 4096*ITF_TOTAL*2, NULL, CONFIG_TINYUSB_TASK_PRIORITY - 1, &hcore0, ESP32_CORE0);
 #else
-    core0_loop();
+    core0_loop(NULL);
 #endif
 
     return 0;
