@@ -225,7 +225,7 @@ static int cmd_write(void) {
         return SW_WRONG_LENGTH();
     }
 
-    uint8_t p1 = P1(apdu), p2 = P2(apdu);
+    uint8_t p1 = P1(apdu);
 
     if (p1 == 0x1) { // PHY
 #ifndef ENABLE_EMULATION
@@ -238,32 +238,7 @@ static int cmd_write(void) {
 #endif
     }
     else if (p1 == 0x2) { // SET TIME
-        time_t tv_sec = 0;
-        if (p2 != 0x1 && p2 != 0x2) {
-            return SW_INCORRECT_P1P2();
-        }
-        if (p2 == 0x1) {
-            if (apdu.nc != 8) {
-                return SW_WRONG_LENGTH();
-            }
-            struct tm tm;
-            tm.tm_year = get_uint16_t_be(apdu.data) - 1900;
-            tm.tm_mon = apdu.data[2];
-            tm.tm_mday = apdu.data[3];
-            tm.tm_wday = apdu.data[4];
-            tm.tm_hour = apdu.data[5];
-            tm.tm_min = apdu.data[6];
-            tm.tm_sec = apdu.data[7];
-            tv_sec = mktime(&tm);
-        }
-        else if (p2 == 0x2) {
-            if (apdu.nc != 4) {
-                return SW_WRONG_LENGTH();
-            }
-            uint32_t t = (apdu.data[0] << 24) | (apdu.data[1] << 16) | (apdu.data[2] << 8) | apdu.data[3];
-            tv_sec = (time_t)t;
-        }
-        set_rtc_time(tv_sec);
+        
     }
     led_3_blinks();
     return SW_OK();
@@ -274,7 +249,7 @@ static int cmd_read(void) {
         return SW_WRONG_LENGTH();
     }
 
-    uint8_t p1 = P1(apdu), p2 = P2(apdu);
+    uint8_t p1 = P1(apdu);
     if (p1 == 0x1) { // PHY
 #ifndef ENABLE_EMULATION
         uint16_t len = 0;
@@ -285,21 +260,6 @@ static int cmd_read(void) {
         res_APDU_size = len;
 #endif
     }
-    else if (p1 == 0x2) { // FLASH INFO
-        res_APDU_size = 0;
-        uint32_t free = flash_free_space(), total = flash_total_space(), used = flash_used_space(), nfiles = flash_num_files(), size = flash_size();
-        res_APDU_size += put_uint32_t_be(free, res_APDU + res_APDU_size);
-        res_APDU_size += put_uint32_t_be(used, res_APDU + res_APDU_size);
-        res_APDU_size += put_uint32_t_be(total, res_APDU + res_APDU_size);
-        res_APDU_size += put_uint32_t_be(nfiles, res_APDU + res_APDU_size);
-        res_APDU_size += put_uint32_t_be(size, res_APDU + res_APDU_size);
-#ifdef PICO_PLATFORM
-        uintptr_t start = (uintptr_t) &__flash_binary_start;
-        uintptr_t end = (uintptr_t) &__flash_binary_end;
-        uint32_t fw_size = (uint32_t)(end - start);
-        res_APDU_size += put_uint32_t_be(fw_size, res_APDU + res_APDU_size);
-#endif
-    }
     else if (p1 == 0x3) { // OTP SECURE BOOT STATUS
         res_APDU_size = 0;
         uint8_t bootkey = 0xFF;
@@ -308,34 +268,6 @@ static int cmd_read(void) {
         res_APDU[res_APDU_size++] = enabled ? 0x1 : 0x0;
         res_APDU[res_APDU_size++] = locked ? 0x1 : 0x0;
         res_APDU[res_APDU_size++] = bootkey;
-    }
-    else if (p1 == 0x4) { // GET TIME
-        if (p2 != 0x1 && p2 != 0x2) {
-            return SW_INCORRECT_P1P2();
-        }
-        if (!has_set_rtc()) {
-            return SW_CONDITIONS_NOT_SATISFIED();
-        }
-        res_APDU_size = 0;
-        time_t tv_sec = get_rtc_time();
-#ifdef PICO_PLATFORM
-        struct timespec tv = {.tv_sec = tv_sec, .tv_nsec = 0};
-#else
-        struct timeval tv = {.tv_sec = tv_sec, .tv_usec = 0};
-#endif
-        if (p2 == 0x1) {
-            struct tm *tm = localtime(&tv.tv_sec);
-            res_APDU_size += put_uint16_t_be(tm->tm_year + 1900, res_APDU);
-            res_APDU[res_APDU_size++] = tm->tm_mon;
-            res_APDU[res_APDU_size++] = tm->tm_mday;
-            res_APDU[res_APDU_size++] = tm->tm_wday;
-            res_APDU[res_APDU_size++] = tm->tm_hour;
-            res_APDU[res_APDU_size++] = tm->tm_min;
-            res_APDU[res_APDU_size++] = tm->tm_sec;
-        }
-        else if (p2 == 0x2) {
-            res_APDU_size += put_uint32_t_be((uint32_t)tv.tv_sec, res_APDU);
-        }
     }
     return SW_OK();
 }
