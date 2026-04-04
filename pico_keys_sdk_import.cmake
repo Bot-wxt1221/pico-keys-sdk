@@ -418,17 +418,18 @@ set(CBOR_SOURCES
 
 set(LIBRARIES)
 if(NOT SKIP_MBEDTLS_FOR_OPENSSL_EMULATION)
-    list(APPEND LIBRARIES mbedtls)
+    set(EXTERNAL_SOURCES ${CBOR_SOURCES})
+    set(EXTERNAL_SOURCES ${EXTERNAL_SOURCES} ${MBEDTLS_SOURCES} ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt/sha256_alt.c)
+    list(APPEND INCLUDES
+        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
+    )
+    add_compile_definitions(MBEDTLS_SHA256_ALT=1)
 endif()
 if(USE_OPENSSL_EMULATION_WRAPPER)
     list(APPEND LIBRARIES OpenSSL::Crypto)
 endif()
 
 if(NOT ESP_PLATFORM)
-    if(NOT SKIP_MBEDTLS_FOR_OPENSSL_EMULATION)
-        add_library(mbedtls STATIC ${MBEDTLS_SOURCES})
-        target_include_directories(mbedtls SYSTEM PUBLIC ${CMAKE_CURRENT_LIST_DIR}/mbedtls/include)
-    endif()
     if(USB_ITF_HID)
         add_library(tinycbor STATIC ${CBOR_SOURCES})
         target_include_directories(tinycbor SYSTEM PUBLIC ${CMAKE_CURRENT_LIST_DIR}/tinycbor/src)
@@ -640,23 +641,10 @@ if(PICO_RP2350)
         pico_set_otp_key_output_file(${CMAKE_PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/otp.json)
     endif()
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE pico_bootrom)
-
-    list(APPEND INCLUDES
-        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
-    )
-    if(TARGET mbedtls)
-        target_include_directories(mbedtls PRIVATE
-            ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
-        )
-        target_link_libraries(mbedtls PRIVATE pico_sha256)
-    endif()
-    list(APPEND PICO_KEYS_SOURCES
-        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt/sha256_alt.c
-    )
-    add_compile_definitions(MBEDTLS_SHA256_ALT=1)
     list(APPEND LIBRARIES pico_sha256)
 endif()
 set(INTERNAL_SOURCES ${PICO_KEYS_SOURCES})
+set(PICO_KEYS_SOURCES ${PICO_KEYS_SOURCES} ${EXTERNAL_SOURCES})
 
 if(NOT TARGET pico_keys_sdk)
     if(PICO_PLATFORM)
