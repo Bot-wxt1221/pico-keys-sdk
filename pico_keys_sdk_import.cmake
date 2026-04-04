@@ -419,11 +419,7 @@ set(CBOR_SOURCES
 set(LIBRARIES)
 if(NOT SKIP_MBEDTLS_FOR_OPENSSL_EMULATION)
     set(EXTERNAL_SOURCES ${CBOR_SOURCES})
-    set(EXTERNAL_SOURCES ${EXTERNAL_SOURCES} ${MBEDTLS_SOURCES} ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt/sha256_alt.c)
-    list(APPEND INCLUDES
-        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
-    )
-    add_compile_definitions(MBEDTLS_SHA256_ALT=1)
+    set(EXTERNAL_SOURCES ${EXTERNAL_SOURCES} ${MBEDTLS_SOURCES})
 endif()
 if(USE_OPENSSL_EMULATION_WRAPPER)
     list(APPEND LIBRARIES OpenSSL::Crypto)
@@ -442,7 +438,6 @@ if(PICO_PLATFORM)
         pico_stdlib
         pico_multicore
         pico_rand
-        pico_sha256
         pico_aon_timer
         hardware_flash
         pico_unique_id
@@ -642,7 +637,6 @@ if(PICO_RP2350)
         pico_set_otp_key_output_file(${CMAKE_PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/otp.json)
     endif()
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE pico_bootrom)
-    list(APPEND LIBRARIES pico_sha256)
 endif()
 set(INTERNAL_SOURCES ${PICO_KEYS_SOURCES})
 set(PICO_KEYS_SOURCES ${PICO_KEYS_SOURCES} ${EXTERNAL_SOURCES})
