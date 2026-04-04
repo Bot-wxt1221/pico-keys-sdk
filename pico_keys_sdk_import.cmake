@@ -442,6 +442,7 @@ if(PICO_PLATFORM)
         pico_stdlib
         pico_multicore
         pico_rand
+        pico_sha256
         pico_aon_timer
         hardware_flash
         pico_unique_id
