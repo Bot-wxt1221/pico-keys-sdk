@@ -196,10 +196,7 @@ bool button_pressed_state = false;
 uint32_t button_pressed_time = 0;
 uint8_t button_press = 0;
 bool wait_button(void) {
-    /* Disabled by default. As LED may not be properly configured,
-       it will not be possible to indicate button press unless it
-       is commissioned. */
-    uint32_t button_timeout = 0;
+    uint32_t button_timeout = 15000;
     if (phy_data.up_btn_present) {
         button_timeout = phy_data.up_btn * 1000;
     }
